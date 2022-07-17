@@ -462,7 +462,6 @@ def auto_fees(stub):
                 update_df = channels_df[channels_df['adjustment']!=0]
                 if not update_df.empty:
                     for target_channel in update_df.to_dict(orient='records'):
-                        print('Updating fees for channel ' + str(target_channel['chan_id']) + ' from: ' + str(target_channel['local_fee_rate']) + ' to a value of: ' + str(target_channel['new_rate']))
                         channel = Channels.objects.filter(chan_id=target_channel['chan_id'])[0]
                         print('Updating fees for channel ' + channel.alias + ' : ' + str(target_channel['chan_id']) + ' from: ' + str(target_channel['local_fee_rate']) + ' to a value of: ' + str(target_channel['new_rate']))
                         channel_point = ln.ChannelPoint()
