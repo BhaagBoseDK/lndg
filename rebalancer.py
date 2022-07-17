@@ -1,4 +1,4 @@
-import django, json, datetime, secrets
+import django, json, datetime, secrets #, time
 from django.db.models import Sum, F
 from datetime import datetime, timedelta
 from gui.lnd_deps import lightning_pb2 as ln
@@ -35,12 +35,16 @@ def run_rebalancer(rebalance):
         chan_ids = json.loads(rebalance.outgoing_chan_ids)
         timeout = rebalance.duration * 60
         invoice_response = stub.AddInvoice(ln.Invoice(value=rebalance.value, expiry=timeout))
-        #print('Rebalance for:', rebalance.target_alias, ' : ', rebalance.last_hop_pubkey, ' Amount:', rebalance.value, ' Duration:', rebalance.duration, ' via:', chan_ids )
-        for payment_response in routerstub.SendPaymentV2(lnr.SendPaymentRequest(payment_request=str(invoice_response.payment_request), fee_limit_msat=int(rebalance.fee_limit*1000), outgoing_chan_ids=chan_ids, last_hop_pubkey=bytes.fromhex(rebalance.last_hop_pubkey), timeout_seconds=(timeout-5), allow_self_payment=True), timeout=(timeout+60)):
-            #print ('Payment Response:', payment_response.status, ' Reason:', payment_response.failure_reason, 'Payment Hash :', payment_response.payment_hash )
+        print('Rebalance for:', rebalance.target_alias, ' : ', rebalance.last_hop_pubkey, ' Amount:', rebalance.value, ' Duration:', rebalance.duration, ' via:', chan_ids )
+        #Save with inflight status
+        rebalance.status = 1
+        rebalance.payment_hash = ''
+        rebalance.save()
+        for payment_response in routerstub.SendPaymentV2(lnr.SendPaymentRequest(payment_request=str(invoice_response.payment_request), fee_limit_msat=int(rebalance.fee_limit*1000), outgoing_chan_ids=chan_ids, last_hop_pubkey=bytes.fromhex(rebalance.last_hop_pubkey), timeout_seconds=(timeout-5), allow_self_payment=True, no_inflight_updates=True), timeout=(timeout+60)):
+            print ('Payment Response:', payment_response.status, ' Reason:', payment_response.failure_reason, 'Payment Hash :', payment_response.payment_hash )
+            rebalance.payment_hash = payment_response.payment_hash
             if payment_response.status == 1 and rebalance.status == 0:
                 #IN-FLIGHT
-                rebalance.payment_hash = payment_response.payment_hash
                 rebalance.status = 1
                 rebalance.save()
             elif payment_response.status == 2:
@@ -67,7 +71,7 @@ def run_rebalancer(rebalance):
             elif payment_response.status == 0:
                 rebalance.status = 400
     except Exception as e:
-        #print('Exception: ', str(e))
+        print('Exception: ', str(e))
         if str(e.code()) == 'StatusCode.DEADLINE_EXCEEDED':
             rebalance.status = 408
         else:
@@ -156,7 +160,7 @@ def auto_schedule():
                                 if not (last_rebalance.status == 2 or (last_rebalance.status in [3, 4, 5, 6, 7, 400, 408] and (int((datetime.now() - last_rebalance.stop).total_seconds() / 60) > wait_period)) or (last_rebalance.status == 1 and (int((datetime.now() - last_rebalance.start).total_seconds() / 60) > wait_period))):
                                     continue
                             print('Creating Auto Rebalance Request')
-                            print('Request for:', target.chan_id)
+                            print('Request for:', target.alias, ' : ', target.chan_id)
                             print('Request routing through:', outbound_cans)
                             print('Target Value:', target_value, '/', target.ar_amt_target)
                             print('Target Fee:', target_fee)
@@ -196,11 +200,11 @@ def auto_enable():
                 capacity += int(peer_channel.capacity)
                 routed_in_apday = forwards.filter(chan_id_in=peer_channel.chan_id).count()
                 routed_out_apday = forwards.filter(chan_id_out=peer_channel.chan_id).count()
-                #TLDR; division by 10000000 gets you routed in 10K sat unit. Eventually we should consider making it a configurable parameter.
+                #Check in and out in million or else no point adjusting.
                 if routed_in_apday > 0:
-                    iapD = iapD + int(forwards.filter(chan_id_in=peer_channel.chan_id).aggregate(Sum('amt_in_msat'))['amt_in_msat__sum']/10000000)
+                    iapD = iapD + int(forwards.filter(chan_id_in=peer_channel.chan_id).aggregate(Sum('amt_in_msat'))['amt_in_msat__sum']/1000000000)
                 if routed_out_apday > 0:
-                    oapD = oapD + int(forwards.filter(chan_id_out=peer_channel.chan_id).aggregate(Sum('amt_out_msat'))['amt_out_msat__sum']/10000000)
+                    oapD = oapD + int(forwards.filter(chan_id_out=peer_channel.chan_id).aggregate(Sum('amt_out_msat'))['amt_out_msat__sum']/1000000000)
 
             outbound_percent = int(round(local_balance*100/capacity, 0))
             inbound_percent = int(round(remote_balance*100/capacity, 0))
@@ -222,6 +226,12 @@ def auto_enable():
                 channel.save()
                 Autopilot(chan_id=channel.chan_id, peer_alias=channel.alias, setting='Enabled', old_value=1, new_value=0).save()
                 print('Auto Pilot Disabled (3): ', channel.alias, ' : ', channel.chan_id, ' In: ', iapD, ' Out: ', oapD )
+            elif oapD == 0 and channel.auto_rebalance == True:
+                #print('Case 3.1: Disable AR - o7D = 0')
+                channel.auto_rebalance = False
+                channel.save()
+                Autopilot(chan_id=channel.chan_id, peer_alias=channel.alias, setting='Enabled', old_value=1, new_value=0).save()
+                print('Auto Pilot Disabled (3.1): ', channel.alias, ' : ', channel.chan_id, ' In: ', iapD, ' out: ', oapD )
             elif oapD < (iapD*1.10) and inbound_percent > 75:
                 #print('Case 4: Pass')
                 pass
@@ -230,13 +240,16 @@ def auto_enable():
                 pass
 
 def main():
+    #print('Debug Sleep')
+    #time.sleep(10)
+
     rebalances = Rebalancer.objects.filter(status=0).order_by('id')
     if len(rebalances) == 0:
         auto_enable()
         auto_schedule()
     else:
         rebalance = rebalances[0]
-        #print('Next Rebalance for:', rebalance.target_alias, ' : ', rebalance.last_hop_pubkey, ' Amount:', rebalance.value, ' Duration:', rebalance.duration )
+        print('Next Rebalance for:', rebalance.target_alias, ' : ', rebalance.last_hop_pubkey, ' Amount:', rebalance.value, ' Duration:', rebalance.duration )
         while rebalance != None:
             rebalance = run_rebalancer(rebalance)
 

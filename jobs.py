@@ -1,4 +1,4 @@
-import django
+import django, time
 from django.db.models import Max
 from datetime import datetime, timedelta
 from gui.lnd_deps import lightning_pb2 as ln
@@ -462,7 +462,7 @@ def auto_fees(stub):
                 update_df = channels_df[channels_df['adjustment']!=0]
                 if not update_df.empty:
                     for target_channel in update_df.to_dict(orient='records'):
-                        print('Updating fees for channel ' + str(target_channel['chan_id']) + ' to a value of: ' + str(target_channel['new_rate']))
+                        print('Updating fees for channel ' + str(target_channel['chan_id']) + ' from: ' + str(target_channel['local_fee_rate']) + ' to a value of: ' + str(target_channel['new_rate']))
                         channel = Channels.objects.filter(chan_id=target_channel['chan_id'])[0]
                         channel_point = ln.ChannelPoint()
                         channel_point.funding_txid_bytes = bytes.fromhex(channel.funding_txid)
@@ -485,11 +485,13 @@ def main():
         update_forwards(stub)
         update_onchain(stub)
         update_closures(stub)
-        reconnect_peers(stub)
+        #reconnect_peers(stub)
         clean_payments(stub)
         auto_fees(stub)
     except Exception as e:
         print('Error processing background data: ' + str(e))
+    #print ('sleeping 60')
+    time.sleep(60)
 
 if __name__ == '__main__':
     main()

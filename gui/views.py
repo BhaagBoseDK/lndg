@@ -171,11 +171,11 @@ def home(request):
                 'node_info': node_info,
                 'total_channels': total_channels,
                 'balances': balances,
-                'payments': payments.annotate(ppm=Round((Sum('fee')*1000000)/Sum('value'), output_field=IntegerField())).order_by('-creation_date')[:6],
+                'payments': payments.annotate(ppm=Round((Sum('fee')*1000000)/Sum('value'), output_field=IntegerField())).order_by('-creation_date')[:21],
                 'total_sent': int(total_sent),
                 'fees_paid': int(total_fees),
                 'total_payments': total_payments,
-                'invoices': invoices.order_by('-creation_date')[:6],
+                'invoices': invoices.order_by('-creation_date')[:21],
                 'total_received': total_received,
                 'total_invoices': total_invoices,
                 'forwards': forwards_df.head(15).to_dict(orient='records'),
@@ -215,11 +215,11 @@ def home(request):
                 'pending_closed': pending_closed,
                 'pending_force_closed': pending_force_closed,
                 'waiting_for_close': waiting_for_close,
-                'rebalances': rebalances[:12],
+                'rebalances': rebalances[:21],
                 'chan_policy_form': ChanPolicyForm,
                 'local_settings': local_settings,
                 'pending_htlc_count': pending_htlc_count,
-                'failed_htlcs': FailedHTLCs.objects.all().order_by('-id')[:10],
+                'failed_htlcs': FailedHTLCs.objects.all().order_by('-id')[:21],
                 'payments_ppm': 0 if total_sent == 0 else int((total_fees/total_sent)*1000000),
                 'routed_ppm': 0 if total_value_forwards == 0 else int((total_earned/total_value_forwards)*1000000),
                 '7day_routed_ppm': 0 if routed_7day_amt == 0 else int((total_earned_7day/routed_7day_amt)*1000000),
@@ -993,11 +993,11 @@ def channel(request):
             'channel': [] if channels_df.empty else channels_df.to_dict(orient='records')[0],
             'incoming_htlcs': PendingHTLCs.objects.filter(chan_id=chan_id).filter(incoming=True).order_by('hash_lock'),
             'outgoing_htlcs': PendingHTLCs.objects.filter(chan_id=chan_id).filter(incoming=False).order_by('hash_lock'),
-            'forwards': [] if forwards_df.empty else forwards_df.sort_values(by=['forward_date'], ascending=False).to_dict(orient='records')[:5],
-            'payments': [] if payments_df.empty else payments_df.sort_values(by=['creation_date'], ascending=False).to_dict(orient='records')[:5],
-            'invoices': [] if invoices_df.empty else invoices_df.sort_values(by=['settle_date'], ascending=False).to_dict(orient='records')[:5],
-            'rebalances': [] if rebalancer_df.empty else rebalancer_df.to_dict(orient='records')[:5],
-            'failed_htlcs': [] if failed_htlc_df.empty else failed_htlc_df.to_dict(orient='records')[:5],
+            'forwards': [] if forwards_df.empty else forwards_df.sort_values(by=['forward_date'], ascending=False).to_dict(orient='records')[:21],
+            'payments': [] if payments_df.empty else payments_df.sort_values(by=['creation_date'], ascending=False).to_dict(orient='records')[:21],
+            'invoices': [] if invoices_df.empty else invoices_df.sort_values(by=['settle_date'], ascending=False).to_dict(orient='records')[:21],
+            'rebalances': [] if rebalancer_df.empty else rebalancer_df.to_dict(orient='records')[:21],
+            'failed_htlcs': [] if failed_htlc_df.empty else failed_htlc_df.to_dict(orient='records')[:21],
             'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links(),
             'network_links': network_links()
@@ -1311,7 +1311,7 @@ def rebalancing(request):
             'eligible_count': eligible_count,
             'enabled_count': enabled_count,
             'channels': channels_df.to_dict(orient='records'),
-            'rebalancer': Rebalancer.objects.all().annotate(ppm=Round((Sum('fee_limit')*1000000)/Sum('value'), output_field=IntegerField())).order_by('-id')[:20],
+            'rebalancer': Rebalancer.objects.all().annotate(ppm=Round((Sum('fee_limit')*1000000)/Sum('value'), output_field=IntegerField())).order_by('-id')[:69],
             'rebalancer_form': RebalancerForm,
             'local_settings': LocalSettings.objects.filter(key__contains='AR-').order_by('key'),
             'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
@@ -1861,7 +1861,7 @@ def update_setting(request):
                     db_apdays = LocalSettings.objects.get(key='AR-APDays')
                 db_apdays.value = apdays
                 db_apdays.save()
-                messages.success(request, 'Updated Autopilot Days setting to: ' + str(apdays))                
+                messages.success(request, 'Updated Autopilot Days setting to: ' + str(apdays))
             elif key == 'AR-Variance':
                 variance = int(value)
                 try:
