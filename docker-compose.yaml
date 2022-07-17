@@ -3,7 +3,7 @@ services:
     build: .
     volumes:
       - /home/umbrel/umbrel/lnd:/root/.lnd:ro
-      - /home/umbrel/lndg/data:/lndg/data:rw
+      - /home/umbrel/lndg:/lndg:rw
     command:
       - sh
       - -c
