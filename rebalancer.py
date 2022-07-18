@@ -41,7 +41,7 @@ def run_rebalancer(rebalance):
         rebalance.payment_hash = ''
         rebalance.save()
         for payment_response in routerstub.SendPaymentV2(lnr.SendPaymentRequest(payment_request=str(invoice_response.payment_request), fee_limit_msat=int(rebalance.fee_limit*1000), outgoing_chan_ids=chan_ids, last_hop_pubkey=bytes.fromhex(rebalance.last_hop_pubkey), timeout_seconds=(timeout-5), allow_self_payment=True, no_inflight_updates=True), timeout=(timeout+60)):
-            print ('Payment Response:', payment_response.status, ' Reason:', payment_response.failure_reason, 'Payment Hash :', payment_response.payment_hash )
+            print ('Payment Response:', payment_response.status, ' Fee: ', payment_response.fee_msat/1000, ' Reason:', payment_response.failure_reason, 'Payment Hash :', payment_response.payment_hash )
             rebalance.payment_hash = payment_response.payment_hash
             if payment_response.status == 1 and rebalance.status == 0:
                 #IN-FLIGHT
