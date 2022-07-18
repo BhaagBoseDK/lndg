@@ -42,6 +42,8 @@ def run_rebalancer(rebalance):
         rebalance.save()
         for payment_response in routerstub.SendPaymentV2(lnr.SendPaymentRequest(payment_request=str(invoice_response.payment_request), fee_limit_msat=int(rebalance.fee_limit*1000), outgoing_chan_ids=chan_ids, last_hop_pubkey=bytes.fromhex(rebalance.last_hop_pubkey), timeout_seconds=(timeout-5), allow_self_payment=True, no_inflight_updates=True), timeout=(timeout+60)):
             print ('Payment Response:', payment_response.status, ' Fee: ', payment_response.fee_msat/1000, ' Reason:', payment_response.failure_reason, 'Payment Hash :', payment_response.payment_hash )
+            original_alias = rebalance.target_alias
+            rebalance.target_alias += ' ==>fee paid : ' + str(payment_response.fee_msat/1000)
             rebalance.payment_hash = payment_response.payment_hash
             if payment_response.status == 1 and rebalance.status == 0:
                 #IN-FLIGHT
@@ -87,7 +89,7 @@ def run_rebalancer(rebalance):
             inbound_cans = auto_rebalance_channels.filter(remote_pubkey=rebalance.last_hop_pubkey).filter(auto_rebalance=True, inbound_can__gte=1)
             outbound_cans = list(auto_rebalance_channels.filter(auto_rebalance=False, percent_outbound__gte=F('ar_out_target')).values_list('chan_id', flat=True))
             if len(inbound_cans) > 0 and len(outbound_cans) > 0:
-                next_rebalance = Rebalancer(value=rebalance.value, fee_limit=rebalance.fee_limit, outgoing_chan_ids=str(outbound_cans).replace('\'', ''), last_hop_pubkey=rebalance.last_hop_pubkey, target_alias=rebalance.target_alias, duration=1)
+                next_rebalance = Rebalancer(value=rebalance.value, fee_limit=rebalance.fee_limit, outgoing_chan_ids=str(outbound_cans).replace('\'', ''), last_hop_pubkey=rebalance.last_hop_pubkey, target_alias=original_alias, duration=1)
                 next_rebalance.save()
             else:
                 next_rebalance = None
