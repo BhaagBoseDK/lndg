@@ -354,7 +354,7 @@ def clean_payments(stub):
             LocalSettings(key='LND-RetentionDays', value='30').save()
             retention_days = 30
         time_filter = datetime.now() - timedelta(days=retention_days)
-        target_payments = Payments.objects.exclude(status=1).filter(cleaned=False).filter(creation_date__lte=time_filter).order_by('index')[:10]
+        target_payments = Payments.objects.exclude(status=1).filter(cleaned=False).filter(creation_date__lte=time_filter).order_by('index')[:420]
         for payment in target_payments:
             payment_hash = bytes.fromhex(payment.payment_hash)
             htlcs_only = True if payment.status == 2 else False
