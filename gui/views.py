@@ -1261,7 +1261,7 @@ def batch_open(request):
                         channel_open.local_funding_amount = open['amt']
                         channels.append(channel_open)
                     response = stub.BatchOpenChannel(ln.BatchOpenChannelRequest(channels=channels, sat_per_vbyte=form.cleaned_data['fee_rate']))
-                    print(response)
+                    print (f"{datetime.now().strftime('%c')} : {response=}")
                     messages.success(request, 'Batch opened channels!')
                 except Exception as e:
                     error = str(e)

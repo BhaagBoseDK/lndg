@@ -116,7 +116,7 @@ def update_invoices(stub):
                     try:
                         valid = signerstub.VerifyMessage(lns.VerifyMessageReq(msg=(records[34349339]+bytes.fromhex(self_pubkey)+records[34349343]+records[34349334]), signature=records[34349337], pubkey=records[34349339])).valid
                     except:
-                        print('Unable to validate signature on invoice: ' + invoice.r_hash.hex())
+                        print (f"{datetime.now().strftime('%c')} : Unable to validate signature on invoice {invoice.r_hash.hex()=}")
                         valid = False
                     sender = records[34349339].hex() if valid == True else None
                     try:
@@ -307,7 +307,7 @@ def update_closures(stub):
                 try:
                     db_closure.save()
                 except Exception as e:
-                    print('Error inserting closure:', str(e))
+                    print (f"{datetime.now().strftime('%c')} : Error inserting closure {str(e)=}")
                     Closures.objects.filter(funding_txid=txid,funding_index=index).delete()
                     return
                 if resolution_count > 0:
@@ -324,16 +324,16 @@ def reconnect_peers(stub):
                 peer = peers.filter(pubkey=inactive_peer)[0] 
                 if peer.last_reconnected == None or (int((datetime.now() - peer.last_reconnected).total_seconds() / 60) > 2):
                     if peer.connected == True:
-                        print('Inactive channel is still connected to peer, disconnecting peer...')
+                        print (f"{datetime.now().strftime('%c')} : Inactive channel is still connected to peer, disconnecting peer. {peer=}")
                         stub.DisconnectPeer(ln.DisconnectPeerRequest(pub_key=inactive_peer))
                         peer.connected = False
                         peer.save()
-                    print('Attempting connection to:', inactive_peer)
+                    print (f"{datetime.now().strftime('%c')} : Attempting connection to {inactive_peer=}")
                     try:
                         node = stub.GetNodeInfo(ln.NodeInfoRequest(pub_key=inactive_peer, include_channels=False)).node
                         host = node.addresses[0].addr
                     except:
-                        print('Unable to find node info on graph, using last known value')
+                        print (f"{datetime.now().strftime('%c')} : Unable to find node info on graph, using last known value {peer=}")
                         host = peer.address
                     address = ln.LightningAddress(pubkey=inactive_peer, host=host)
                     stub.ConnectPeer(request = ln.ConnectPeerRequest(addr=address, perm=True, timeout=5))
@@ -365,8 +365,7 @@ def clean_payments(stub):
                 details_index = error.find('details =') + 11
                 debug_error_index = error.find('debug_error_string =') - 3
                 error_msg = error[details_index:debug_error_index]
-                print('Error occured when cleaning payment: ' + payment.payment_hash)
-                print('Error: ' + error_msg)
+                print (f"{datetime.now().strftime('%c')} : Error occured when cleaning payment {payment.payment_hash=} {error_msg=}")
             finally:
                 payment.cleaned = True
                 payment.save()
@@ -463,7 +462,7 @@ def auto_fees(stub):
                 if not update_df.empty:
                     for target_channel in update_df.to_dict(orient='records'):
                         channel = Channels.objects.filter(chan_id=target_channel['chan_id'])[0]
-                        print('Updating fees for channel ' + channel.alias + ' : ' + str(target_channel['chan_id']) + ' from: ' + str(target_channel['local_fee_rate']) + ' to a value of: ' + str(target_channel['new_rate']))
+                        print (f"{datetime.now().strftime('%c')} : Updating fees for channel {channel.alias=}  {str(target_channel['chan_id'])=} {str(target_channel['local_fee_rate'])=} {str(target_channel['new_rate'])=}")
                         channel_point = ln.ChannelPoint()
                         channel_point.funding_txid_bytes = bytes.fromhex(channel.funding_txid)
                         channel_point.funding_txid_str = channel.funding_txid
@@ -475,6 +474,7 @@ def auto_fees(stub):
                         Autofees(chan_id=channel.chan_id, peer_alias=channel.alias, setting='Fee Rate', old_value=target_channel['local_fee_rate'], new_value=target_channel['new_rate']).save()
 
 def main():
+    #print (f"{datetime.now().strftime('%c')} : Entering Jobs")
     try:
         stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
         #Update data
@@ -489,7 +489,8 @@ def main():
         clean_payments(stub)
         auto_fees(stub)
     except Exception as e:
-        print('Error processing background data: ' + str(e))
+        print (f"{datetime.now().strftime('%c')} : Error processing background data: {str(e)=}")
+    #print (f"{datetime.now().strftime('%c')} : Job done")
     #print ('sleeping 60')
     time.sleep(60)
 

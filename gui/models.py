@@ -1,3 +1,4 @@
+from datetime import datetime
 from django.db import models
 from django.utils import timezone
 
@@ -109,7 +110,7 @@ class Channels(models.Model):
                 LocalSettings(key='AF-Enabled', value='0').save()
                 enabled = 0
             self.auto_fees = False if enabled == 0 else True
-            print ('AutoFee Updated for new channel:', self.alias, ' : ', self.chan_id, ' : ', str(self.auto_fees))
+            print (f"{datetime.now().strftime('%c')} : AutoFee Updated for new channel  {self.alias=} {self.chan_id=} {str(self.auto_fees)=}")
         if not self.ar_out_target:
             if LocalSettings.objects.filter(key='AR-Outbound%').exists():
                 outbound_setting = int(LocalSettings.objects.filter(key='AR-Outbound%')[0].value)
