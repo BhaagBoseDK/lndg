@@ -7,3 +7,4 @@ frontend
 node_modules
 lndg-admin.txt
 .vscode
+cp_lndg.sh
