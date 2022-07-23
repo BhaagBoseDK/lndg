@@ -101,6 +101,7 @@ class Channels(models.Model):
     ar_max_cost = models.IntegerField()
     fees_updated = models.DateTimeField(default=timezone.now)
     auto_fees = models.BooleanField()
+    closing_costs = models.IntegerField(default=0)
 
     def save(self, *args, **kwargs):
         if self.auto_fees is None:
@@ -169,6 +170,7 @@ class Rebalancer(models.Model):
     status = models.IntegerField(default=0)
     payment_hash = models.CharField(max_length=64, null=True, default=None)
     manual = models.BooleanField(default=False)
+    fees_paid = models.FloatField(null=True, default=None)
     class Meta:
         app_label = 'gui'
 
