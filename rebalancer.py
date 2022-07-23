@@ -50,6 +50,7 @@ def run_rebalancer(rebalance):
             elif payment_response.status == 2:
                 #SUCCESSFUL
                 rebalance.status = 2
+                rebalance.fees_paid = payment_response.fee_msat/1000
                 successful_out = payment_response.htlcs[0].route.hops[0].pub_key
             elif payment_response.status == 3:
                 #FAILURE
@@ -84,7 +85,7 @@ def run_rebalancer(rebalance):
         if rebalance.status ==2:
 
             original_alias = rebalance.target_alias
-            rebalance.target_alias += ' ==>fee paid : ' + str(payment_response.fee_msat/1000) + '(' + str(int(payment_response.fee_msat/payment_response.value_msat*1000000)) + ')'
+            rebalance.target_alias += ' ==> (' + str(int(payment_response.fee_msat/payment_response.value_msat*1000000)) + ')'
 
             update_channels(stub, rebalance.last_hop_pubkey, successful_out)
             auto_rebalance_channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(percent_outbound=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).annotate(inbound_can=(((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity'))/Sum('ar_in_target'))
