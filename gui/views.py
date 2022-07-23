@@ -155,9 +155,7 @@ def home(request):
                 'balances': balances,
                 'payments': payments.annotate(ppm=Round((Sum('fee')*1000000)/Sum('value'), output_field=IntegerField())).order_by('-creation_date')[:21],
                 'invoices': invoices.order_by('-creation_date')[:21],
-                'total_received': total_received,
-                'total_invoices': total_invoices,
-                'forwards': forwards[:21]
+                'forwards': forwards[:21],
                 'routed_7day': routed_7day,
                 'routed_7day_amt': routed_7day_amt,
                 'earned_7day': int(total_earned_7day),
