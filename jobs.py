@@ -1,5 +1,5 @@
 import django, time
-from django.db.models import Max
+from django.db.models import Max, Min
 from datetime import datetime, timedelta
 from gui.lnd_deps import lightning_pb2 as ln
 from gui.lnd_deps import lightning_pb2_grpc as lnrpc
@@ -15,9 +15,12 @@ from gui.models import Payments, PaymentHops, Invoices, Forwards, Channels, Peer
 
 def update_payments(stub):
     #Remove anything in-flight so we can get most up to date status
+    in_flight_index = 0 if Payments.objects.filter(status=1, cleaned=False).aggregate(Min('index'))['index__min'] == None else Payments.objects.filter(status=1).aggregate(Min('index'))['index__min']
     Payments.objects.filter(status=1).delete()
     #Get the number of records in the database currently
     last_index = 0 if Payments.objects.aggregate(Max('index'))['index__max'] == None else Payments.objects.aggregate(Max('index'))['index__max']
+    print (f"{datetime.now().strftime('%c')} : {in_flight_index=} {last_index=} {min(in_flight_index, last_index) if in_flight_index > 0 else last_index=}")
+    last_index = min(in_flight_index, last_index) if in_flight_index > 0 else last_index
     payments = stub.ListPayments(ln.ListPaymentsRequest(include_incomplete=True, index_offset=last_index, max_payments=100)).payments
     self_pubkey = stub.GetInfo(ln.GetInfoRequest()).identity_pubkey
     for payment in payments:
@@ -63,6 +66,7 @@ def update_payments(stub):
             db_payment.fee = round(payment.fee_msat/1000, 3)
             db_payment.status = payment.status
             db_payment.index = payment.payment_index
+            db_payment.cleaned = False
             db_payment.save()
             if payment.status == 2:
                 for attempt in payment.htlcs:
@@ -357,7 +361,7 @@ def clean_payments(stub):
         target_payments = Payments.objects.exclude(status=1).filter(cleaned=False).filter(creation_date__lte=time_filter).order_by('index')[:420]
         for payment in target_payments:
             payment_hash = bytes.fromhex(payment.payment_hash)
-            htlcs_only = True if payment.status == 2 else False
+            htlcs_only = True if (payment.status == 2) else False
             try:
                 stub.DeletePayment(ln.DeletePaymentRequest(payment_hash=payment_hash, failed_htlcs_only=htlcs_only))
             except Exception as e:
@@ -365,10 +369,11 @@ def clean_payments(stub):
                 details_index = error.find('details =') + 11
                 debug_error_index = error.find('debug_error_string =') - 3
                 error_msg = error[details_index:debug_error_index]
-                print (f"{datetime.now().strftime('%c')} : Error occured when cleaning payment {payment.payment_hash=} {error_msg=}")
+                print (f"{datetime.now().strftime('%c')} : Error  {payment.index=} {payment.status=} {payment.payment_hash=} {error_msg=}")
             finally:
                 payment.cleaned = True
                 payment.save()
+                print (f"{datetime.now().strftime('%c')} : Cleaned {payment.index=} {payment.status=} {payment.cleaned=} {payment.payment_hash=}")
 
 def auto_fees(stub):
     if LocalSettings.objects.filter(key='AF-Enabled').exists():
