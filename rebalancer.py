@@ -21,7 +21,7 @@ def run_rebalancer(rebalance):
             unknown_error.save()
     auto_rebalance_channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(percent_outbound=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).annotate(inbound_can=(((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity'))/Sum('ar_in_target'))
     outbound_cans = list(auto_rebalance_channels.filter(auto_rebalance=False, percent_outbound__gte=F('ar_out_target')).exclude(remote_pubkey=rebalance.last_hop_pubkey).values_list('chan_id', flat=True))
-    if len(outbound_cans) == 0:
+    if len(outbound_cans) == 0 and rebalance.manual == False:
         print (datetime.now().strftime('%c'), 'No outbound_cans', sep=' : ')
         return None
     elif str(outbound_cans).replace('\'', '') != rebalance.outgoing_chan_ids and rebalance.manual == False:
@@ -129,6 +129,8 @@ def auto_schedule():
         if len(auto_rebalance_channels) > 0:
             if not LocalSettings.objects.filter(key='AR-Outbound%').exists():
                 LocalSettings(key='AR-Outbound%', value='75').save()
+            if not LocalSettings.objects.filter(key='AR-Inbound%').exists():
+                LocalSettings(key='AR-Inbound%', value='100').save()
             outbound_cans = list(auto_rebalance_channels.filter(auto_rebalance=False, percent_outbound__gte=F('ar_out_target')).values_list('chan_id', flat=True))
             inbound_cans = auto_rebalance_channels.filter(auto_rebalance=True, inbound_can__gte=1)
             if len(inbound_cans) > 0 and len(outbound_cans) > 0:
