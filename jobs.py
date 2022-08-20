@@ -19,12 +19,19 @@ def update_payments(stub):
     self_pubkey = stub.GetInfo(ln.GetInfoRequest()).identity_pubkey
     inflight_payments = Payments.objects.filter(status=1).order_by('index')
     for payment in inflight_payments:
+        print (f"{datetime.now().strftime('%c')} : Processing {payment.index=} {payment.status=} {payment.payment_hash=}")
         payment_data = stub.ListPayments(ln.ListPaymentsRequest(include_incomplete=True, index_offset=payment.index-1, max_payments=1)).payments
         if len(payment_data) > 0 and payment.payment_hash == payment_data[0].payment_hash:
             update_payment(stub, payment_data[0], self_pubkey)
+        else:
+            print (f"{datetime.now().strftime('%c')} : ... does not exist with lnd, mark failed ... {payment.index=} {payment.status=} {payment.payment_hash=} {payment_data[0].payment_hash=} {len(payment_data)}")
+            payment.status=3
+            payment.save()
+
     last_index = Payments.objects.aggregate(Max('index'))['index__max'] if Payments.objects.exists() else 0
     payments = stub.ListPayments(ln.ListPaymentsRequest(include_incomplete=True, index_offset=last_index, max_payments=100)).payments
     for payment in payments:
+        print (f"{datetime.now().strftime('%c')} : Processing {payment.payment_index=} {payment.status=} {payment.payment_hash=}")
         try:
             new_payment = Payments(creation_date=datetime.fromtimestamp(payment.creation_date), payment_hash=payment.payment_hash, value=round(payment.value_msat/1000, 3), fee=round(payment.fee_msat/1000, 3), status=payment.status, index=payment.payment_index)
             new_payment.save()
