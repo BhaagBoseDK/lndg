@@ -27,7 +27,6 @@ def update_payments(stub):
             print (f"{datetime.now().strftime('%c')} : ... does not exist with lnd, mark failed ... {payment.index=} {payment.status=} {payment.payment_hash=} {payment_data[0].payment_hash=} {len(payment_data)}")
             payment.status=3
             payment.save()
-
     last_index = Payments.objects.aggregate(Max('index'))['index__max'] if Payments.objects.exists() else 0
     payments = stub.ListPayments(ln.ListPaymentsRequest(include_incomplete=True, index_offset=last_index, max_payments=100)).payments
     for payment in payments:
@@ -122,7 +121,6 @@ def update_invoices(stub):
             print (f"{datetime.now().strftime('%c')} : ... invoice does not exist with lnd, mark failed ... {open_invoice.index=} {open_invoice.state=} {open_invoice.r_hash=}")
             open_invoice.state=2
             open_invoice.save()
-
     last_index = Invoices.objects.aggregate(Max('index'))['index__max'] if Invoices.objects.exists() else 0
     invoices = stub.ListInvoices(ln.ListInvoiceRequest(index_offset=last_index, num_max_invoices=100)).invoices
     for invoice in invoices:
@@ -389,7 +387,7 @@ def update_closures(stub):
                 channel = Channels.objects.filter(chan_id=closure.chan_id)[0] if Channels.objects.filter(chan_id=closure.chan_id).exists() else None
                 resolution_count = len(closure.resolutions)
                 txid, index = closure.channel_point.split(':')
-                closing_costs = get_tx_fees(txid) if closure.open_initiator == 1 else 0
+                closing_costs = get_tx_fees(closure.closing_tx_hash) if closure.open_initiator == 1 else 0
                 db_closure = Closures(chan_id=closure.chan_id, funding_txid=txid, funding_index=index, closing_tx=closure.closing_tx_hash, remote_pubkey=closure.remote_pubkey, capacity=closure.capacity, close_height=closure.close_height, settled_balance=closure.settled_balance, time_locked_balance=closure.time_locked_balance, close_type=closure.close_type, open_initiator=closure.open_initiator, close_initiator=closure.close_initiator, resolution_count=resolution_count)
                 try:
                     db_closure.save()
