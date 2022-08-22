@@ -114,12 +114,19 @@ def update_payment(stub, payment, self_pubkey):
 def update_invoices(stub):
     open_invoices = Invoices.objects.filter(state=0).order_by('index')
     for open_invoice in open_invoices:
+        print (f"{datetime.now().strftime('%c')} : Processing invoice {open_invoice.index=} {open_invoice.state=} {open_invoice.r_hash=}")
         invoice_data = stub.ListInvoices(ln.ListInvoiceRequest(index_offset=open_invoice.index-1, num_max_invoices=1)).invoices
         if len(invoice_data) > 0 and open_invoice.r_hash == invoice_data[0].r_hash.hex():
             update_invoice(stub, invoice_data[0], open_invoice)
+        else:
+            print (f"{datetime.now().strftime('%c')} : ... invoice does not exist with lnd, mark failed ... {open_invoice.index=} {open_invoice.state=} {open_invoice.r_hash=}")
+            open_invoice.state=2
+            open_invoice.save()
+
     last_index = Invoices.objects.aggregate(Max('index'))['index__max'] if Invoices.objects.exists() else 0
     invoices = stub.ListInvoices(ln.ListInvoiceRequest(index_offset=last_index, num_max_invoices=100)).invoices
     for invoice in invoices:
+        print (f"{datetime.now().strftime('%c')} : Processing invoice {invoice.add_index=} {invoice.settle_index=} {invoice.state=} {invoice.r_hash.hex()=}")
         db_invoice = Invoices(creation_date=datetime.fromtimestamp(invoice.creation_date), r_hash=invoice.r_hash.hex(), value=round(invoice.value_msat/1000, 3), amt_paid=invoice.amt_paid_sat, state=invoice.state, index=invoice.add_index)
         db_invoice.save()
         update_invoice(stub, invoice, db_invoice)

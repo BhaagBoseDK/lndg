@@ -1379,7 +1379,8 @@ def payments(request):
 def invoices(request):
     if request.method == 'GET':
         context = {
-            'invoices': Invoices.objects.filter(state=1).order_by('-creation_date')[:150],
+            #'invoices': Invoices.objects.order_by('-creation_date')[:150],
+            'invoices': Invoices.objects.filter(state__lte=1).order_by('-creation_date')[:150],
         }
         return render(request, 'invoices.html', context)
     else:
