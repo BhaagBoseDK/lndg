@@ -1606,8 +1606,9 @@ def keysends(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def autopilot(request):
     if request.method == 'GET':
+        filter_21d= datetime.now() - timedelta(days=21)
         context = {
-            'autopilot': Autopilot.objects.all().order_by('-id')
+            'autopilot': Autopilot.objects.filter(timestamp__gte=filter_21d).order_by('-id')
         }
         return render(request, 'autopilot.html', context)
     else:
@@ -1616,8 +1617,9 @@ def autopilot(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def autofees(request):
     if request.method == 'GET':
+        filter_21d= datetime.now() - timedelta(days=21)
         context = {
-            'autofees': Autofees.objects.all().order_by('-id')
+            'autofees': Autofees.objects.filter(timestamp__gte=filter_21d).order_by('-id')
         }
         return render(request, 'autofees.html', context)
     else:

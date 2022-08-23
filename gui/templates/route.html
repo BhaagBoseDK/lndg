@@ -7,6 +7,7 @@
   <h2>Route For : {{ payment_hash }}</h2>
   <table class="w3-table-all w3-centered w3-hoverable">
     <tr>
+      <th>Attempt Id</th>
       <th>Step</th>
       <th>Amount</th>
       <th>Fee</th>
@@ -19,6 +20,7 @@
     </tr>
     {% for hop in route %}
     <tr>
+      <td>{{ hop.attempt_id }}</td>
       <td>{{ hop.step }}</td>
       <td>{{ hop.amt|intcomma }}</td>
       <td>{{ hop.fee|intcomma }}</td>
