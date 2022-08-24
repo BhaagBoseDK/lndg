@@ -1392,7 +1392,14 @@ def rebalances(request):
         context = {
             'rebalances': Rebalancer.objects.all().annotate(ppm=Round((Sum('fee_limit')*1000000)/Sum('value'), output_field=IntegerField())).order_by('-id')[:150],
         }
-        return render(request, 'rebalances.html', context)
+        try:
+            return render(request, 'rebalances.html', context)
+        except Exception as e:
+            try:
+                error = str(e.code())
+            except:
+                error = str(e)
+            return render(request, 'error.html', {'error': error})
     else:
         return redirect('home')
 
@@ -1606,7 +1613,7 @@ def keysends(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def autopilot(request):
     if request.method == 'GET':
-        filter_21d= datetime.now() - timedelta(days=21)
+        filter_21d = datetime.now() - timedelta(days=21)
         context = {
             'autopilot': Autopilot.objects.filter(timestamp__gte=filter_21d).order_by('-id')
         }
@@ -1617,9 +1624,9 @@ def autopilot(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def autofees(request):
     if request.method == 'GET':
-        filter_21d= datetime.now() - timedelta(days=21)
+        filter_7d = datetime.now() - timedelta(days=7)
         context = {
-            'autofees': Autofees.objects.filter(timestamp__gte=filter_21d).order_by('-id')
+            'autofees': Autofees.objects.filter(timestamp__gte=filter_7d).order_by('-id')
         }
         return render(request, 'autofees.html', context)
     else:
