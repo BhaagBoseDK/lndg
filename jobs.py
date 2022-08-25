@@ -19,12 +19,13 @@ def update_payments(stub):
     self_pubkey = stub.GetInfo(ln.GetInfoRequest()).identity_pubkey
     inflight_payments = Payments.objects.filter(status=1).order_by('index')
     for payment in inflight_payments:
-        print (f"{datetime.now().strftime('%c')} : Processing {payment.index=} {payment.status=} {payment.payment_hash=}")
+        print (f"{datetime.now().strftime('%c')} : Processing {payment.index=} {payment.status=} {payment.creation_date=} {payment.payment_hash=}")
         payment_data = stub.ListPayments(ln.ListPaymentsRequest(include_incomplete=True, index_offset=payment.index-1, max_payments=1)).payments
-        if len(payment_data) > 0 and payment.payment_hash == payment_data[0].payment_hash:
+        #Ignore inflight payments before 30 days
+        if len(payment_data) > 0 and payment.payment_hash == payment_data[0].payment_hash and payment.creation_date > (datetime.now() - timedelta(days=30)):
             update_payment(stub, payment_data[0], self_pubkey)
         else:
-            print (f"{datetime.now().strftime('%c')} : ... does not exist with lnd, mark failed ... {payment.index=} {payment.status=} {payment.payment_hash=} {payment_data[0].payment_hash=} {len(payment_data)}")
+            print (f"{datetime.now().strftime('%c')} : ... does not exist with lnd, mark failed ... {payment.index=} {payment.status=} {payment.creation_date=} {payment.payment_hash=}")
             payment.status=3
             payment.save()
     last_index = Payments.objects.aggregate(Max('index'))['index__max'] if Payments.objects.exists() else 0
