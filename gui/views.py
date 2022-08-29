@@ -1632,10 +1632,17 @@ def autopilot(request):
 def autofees(request):
     if request.method == 'GET':
         filter_7d = datetime.now() - timedelta(days=7)
-        context = {
-            'autofees': Autofees.objects.filter(timestamp__gte=filter_7d).order_by('-id')
-        }
-        return render(request, 'autofees.html', context)
+        try:
+            context = {
+                'autofees': Autofees.objects.filter(timestamp__gte=filter_7d).order_by('-id').annotate(change=(Sum('new_value')-Sum('old_value'))*100/Sum('old_value'))
+            }
+            return render(request, 'autofees.html', context)
+        except Exception as e:
+            try:
+                error = str(e.code())
+            except:
+                error = str(e)
+            return render(request, 'error.html', {'error': error})
     else:
         return redirect('home')
 
