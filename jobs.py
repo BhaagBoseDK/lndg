@@ -472,6 +472,7 @@ def clean_payments(stub):
                 print (f"{datetime.now().strftime('%c')} : Cleaned {payment.index=} {payment.status=} {payment.cleaned=} {payment.payment_hash=}")
 
 def auto_fees(stub):
+    print (f"{datetime.now().strftime('%c')} : Processing Auto Fees")
     if LocalSettings.objects.filter(key='AF-Enabled').exists():
         enabled = int(LocalSettings.objects.filter(key='AF-Enabled')[0].value)
     else:
@@ -518,11 +519,13 @@ def auto_fees(stub):
                 forwards_df_7d = DataFrame.from_records(forwards.values())
                 forwards_df_in_7d_sum = DataFrame() if forwards_df_7d.empty else forwards_df_7d.groupby('chan_id_in', as_index=True).sum()
                 forwards_df_out_7d_sum = DataFrame() if forwards_df_7d.empty else forwards_df_7d.groupby('chan_id_out', as_index=True).sum()
+                #print (f"{datetime.now().strftime('%c')} : {forwards_df_in_7d_sum=}")
+                #print (f"{datetime.now().strftime('%c')} : {forwards_df_out_7d_sum=}")
                 channels_df['local_balance'] = channels_df.apply(lambda row: row.local_balance + row.pending_outbound, axis=1)
                 channels_df['remote_balance'] = channels_df.apply(lambda row: row.remote_balance + row.pending_inbound, axis=1)
                 channels_df['in_percent'] = channels_df.apply(lambda row: int(round((row['remote_balance']/row['capacity'])*100, 0)), axis=1)
                 channels_df['out_percent'] = channels_df.apply(lambda row: int(round((row['local_balance']/row['capacity'])*100, 0)), axis=1)
-                channels_df['amt_routed_in_7day'] = channels_df.apply(lambda row: int(forwards_df_in_7d_sum.loc[row.chan_id].amt_out_msat/1000) if (forwards_df_in_7d_sum.index == row.chan_id).any() else 0, axis=1)
+                channels_df['amt_routed_in_7day'] = channels_df.apply(lambda row: int(forwards_df_in_7d_sum.loc[row.chan_id].amt_in_msat/1000) if (forwards_df_in_7d_sum.index == row.chan_id).any() else 0, axis=1)
                 channels_df['amt_routed_out_7day'] = channels_df.apply(lambda row: int(forwards_df_out_7d_sum.loc[row.chan_id].amt_out_msat/1000) if (forwards_df_out_7d_sum.index == row.chan_id).any() else 0, axis=1)
                 channels_df['net_routed_7day'] = channels_df.apply(lambda row: round((row['amt_routed_out_7day']-row['amt_routed_in_7day'])/row['capacity'], 1), axis=1)
                 channels_df['revenue_7day'] = channels_df.apply(lambda row: int(forwards_df_out_7d_sum.loc[row.chan_id].fee) if forwards_df_out_7d_sum.empty == False and (forwards_df_out_7d_sum.index == row.chan_id).any() else 0, axis=1)
@@ -541,10 +544,10 @@ def auto_fees(stub):
                 channels_df['profit_margin'] = channels_df.apply(lambda row: row['out_rate']*((100-row['ar_max_cost'])/100), axis=1)
                 channels_df['max_suggestion'] = channels_df.apply(lambda row: int((row['out_rate']+row['profit_margin'] if row['out_rate'] > 0 else row['local_fee_rate'])*1.15) if row['in_percent'] > 25 else int(row['local_fee_rate']), axis=1)
                 channels_df['max_suggestion'] = channels_df.apply(lambda row: row['local_fee_rate']*1.21 if row['max_suggestion'] > (row['local_fee_rate']*1.21) or row['max_suggestion'] == 0 else row['max_suggestion'], axis=1)
-                channels_df['min_suggestion'] = channels_df.apply(lambda row: int((row['rebal_ppm'] if row['out_rate'] > 0 else row['local_fee_rate'])*0.75) if row['out_percent'] > 25 else int(row['local_fee_rate']), axis=1)
+                channels_df['min_suggestion'] = channels_df.apply(lambda row: int((row['rebal_ppm'] if row['out_rate'] > 0 else row['local_fee_rate'])*0.79) if row['out_percent'] > 25 else int(row['local_fee_rate']), axis=1)
                 channels_df['min_suggestion'] = channels_df.apply(lambda row: row['local_fee_rate']*0.79 if row['min_suggestion'] < (row['local_fee_rate']*0.79) else row['min_suggestion'], axis=1)
                 channels_df['assisted_ratio'] = channels_df.apply(lambda row: round((row['revenue_assist_7day'] if row['revenue_7day'] == 0 else row['revenue_assist_7day']/row['revenue_7day']), 2), axis=1)
-                channels_df['adjusted_out_rate'] = channels_df.apply(lambda row: int(row['out_rate']+row['net_routed_7day']*row['assisted_ratio']*multiplier), axis=1)
+                channels_df['adjusted_out_rate'] = channels_df.apply(lambda row: int(row['out_rate']+row['net_routed_7day']*row['assisted_ratio']*multiplier/100), axis=1)
                 channels_df['adjusted_rebal_rate'] = channels_df.apply(lambda row: int(row['rebal_ppm']+row['profit_margin']), axis=1)
                 channels_df['out_rate_only'] = channels_df.apply(lambda row: int(row['out_rate']+row['net_routed_7day']*row['out_rate']*(multiplier/100)), axis=1)
                 channels_df['fee_rate_only'] = channels_df.apply(lambda row: int(row['local_fee_rate']+row['net_routed_7day']*row['local_fee_rate']*(multiplier/100)), axis=1)
@@ -561,6 +564,7 @@ def auto_fees(stub):
                 channels_df['adjustment'] = channels_df.apply(lambda row: int(row['new_rate']-row['local_fee_rate']), axis=1)
                 update_df = channels_df[channels_df['adjustment']!=0]
                 if not update_df.empty:
+                    print (update_df[['chan_id', 'in_percent', 'out_percent', 'net_routed_7day', 'revenue_7day', 'revenue_assist_7day', 'local_fee_rate', 'out_rate', 'rebal_ppm', 'profit_margin', 'max_suggestion', 'min_suggestion', 'assisted_ratio', 'adjusted_out_rate', 'adjusted_rebal_rate', 'out_rate_only', 'fee_rate_only', 'new_rate', 'adjustment']].to_string())
                     for target_channel in update_df.to_dict(orient='records'):
                         channel = Channels.objects.filter(chan_id=target_channel['chan_id'])[0]
                         print (f"{datetime.now().strftime('%c')} : Updating fees for channel {channel.alias=}  {str(target_channel['chan_id'])=} {str(target_channel['local_fee_rate'])=} {str(target_channel['new_rate'])=}")
