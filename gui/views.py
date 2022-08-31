@@ -1626,9 +1626,11 @@ def keysends(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def autopilot(request):
     if request.method == 'GET':
+        chan_id = request.GET.urlencode()[1:]
         filter_21d = datetime.now() - timedelta(days=21)
+        autopilot = Autopilot.objects.filter(timestamp__gte=filter_21d).order_by('-id') if chan_id == "" else Autopilot.objects.filter(chan_id = chan_id).filter(timestamp__gte=filter_21d).order_by('-id')
         context = {
-            'autopilot': Autopilot.objects.filter(timestamp__gte=filter_21d).order_by('-id')
+            'autopilot': autopilot
         }
         return render(request, 'autopilot.html', context)
     else:
@@ -1637,10 +1639,13 @@ def autopilot(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def autofees(request):
     if request.method == 'GET':
+        chan_id = request.GET.urlencode()[1:]
         filter_7d = datetime.now() - timedelta(days=7)
+        autofees = Autofees.objects.filter(timestamp__gte=filter_7d).order_by('-id').annotate(change=(Sum('new_value')-Sum('old_value'))*100/Sum('old_value')) if chan_id == "" else Autofees.objects.filter(chan_id=chan_id).filter(timestamp__gte=filter_7d).order_by('-id').annotate(change=(Sum('new_value')-Sum('old_value'))*100/Sum('old_value'))
+        #print (f"{datetime.now().strftime('%c')} : {chan_id=} {autofees=}")
         try:
             context = {
-                'autofees': Autofees.objects.filter(timestamp__gte=filter_7d).order_by('-id').annotate(change=(Sum('new_value')-Sum('old_value'))*100/Sum('old_value'))
+                'autofees': autofees
             }
             return render(request, 'autofees.html', context)
         except Exception as e:
