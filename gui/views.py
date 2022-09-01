@@ -1620,8 +1620,10 @@ def rebalancing(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def keysends(request):
     if request.method == 'GET':
+        r_hash = request.GET.urlencode()[1:]
+        keysends = Invoices.objects.filter(keysend_preimage__isnull=False).order_by('-settle_date')[:169] if r_hash == "" else Invoices.objects.filter( r_hash=r_hash).filter(keysend_preimage__isnull=False).order_by('-settle_date')[:169]
         context = {
-            'keysends': Invoices.objects.filter(keysend_preimage__isnull=False).order_by('-settle_date')
+            'keysends': keysends
         }
         return render(request, 'keysends.html', context)
     else:
