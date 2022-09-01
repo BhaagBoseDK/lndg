@@ -89,7 +89,7 @@ def adjust_ar_amt( payment, chan_id ):
     if payment.status == 2 and chan_id is not None:
         db_channel = Channels.objects.filter(chan_id = chan_id)[0] if Channels.objects.filter(chan_id = chan_id).exists() else None
         if db_channel is not None and payment.value_msat/1000 > 1000 :
-            new_ar_amount = int(min(db_channel.ar_amt_target * 1.21, db_channel.capacity*0.21))
+            new_ar_amount = int(min(max(db_channel.ar_amt_target * 1.21, payment.value_msat/1000), db_channel.capacity*0.21))
             print (f"{datetime.now().strftime('%c')} : Increase AR Target Amount {chan_id=} {db_channel.alias=} {db_channel.ar_amt_target=} {new_ar_amount=}")
             db_channel.ar_amt_target = new_ar_amount
             db_channel.save()
