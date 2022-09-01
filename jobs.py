@@ -19,7 +19,7 @@ def update_payments(stub):
     self_pubkey = stub.GetInfo(ln.GetInfoRequest()).identity_pubkey
     inflight_payments = Payments.objects.filter(status=1).order_by('index')
     for payment in inflight_payments:
-        print (f"{datetime.now().strftime('%c')} : Processing {payment.index=} {payment.status=} {payment.creation_date=} {payment.payment_hash=}")
+        #print (f"{datetime.now().strftime('%c')} : Processing inflight {payment.index=} {payment.status=} {payment.creation_date=} {payment.payment_hash=}")
         payment_data = stub.ListPayments(ln.ListPaymentsRequest(include_incomplete=True, index_offset=payment.index-1, max_payments=1)).payments
         #Ignore inflight payments before 30 days
         if len(payment_data) > 0 and payment.payment_hash == payment_data[0].payment_hash and payment.creation_date > (datetime.now() - timedelta(days=30)):
@@ -31,7 +31,7 @@ def update_payments(stub):
     last_index = Payments.objects.aggregate(Max('index'))['index__max'] if Payments.objects.exists() else 0
     payments = stub.ListPayments(ln.ListPaymentsRequest(include_incomplete=True, index_offset=last_index, max_payments=100)).payments
     for payment in payments:
-        print (f"{datetime.now().strftime('%c')} : Processing New {payment.payment_index=} {payment.status=} {payment.payment_hash=}")
+        #print (f"{datetime.now().strftime('%c')} : Processing New {payment.payment_index=} {payment.status=} {payment.payment_hash=}")
         try:
             new_payment = Payments(creation_date=datetime.fromtimestamp(payment.creation_date), payment_hash=payment.payment_hash, value=round(payment.value_msat/1000, 3), fee=round(payment.fee_msat/1000, 3), status=payment.status, index=payment.payment_index)
             new_payment.save()
@@ -115,7 +115,7 @@ def adjust_ar_amt( payment, chan_id ):
 def update_invoices(stub):
     open_invoices = Invoices.objects.filter(state=0).order_by('index')
     for open_invoice in open_invoices:
-        print (f"{datetime.now().strftime('%c')} : Processing invoice {open_invoice.index=} {open_invoice.state=} {open_invoice.r_hash=}")
+        print (f"{datetime.now().strftime('%c')} : Processing open invoice {open_invoice.index=} {open_invoice.state=} {open_invoice.r_hash=}")
         invoice_data = stub.ListInvoices(ln.ListInvoiceRequest(index_offset=open_invoice.index-1, num_max_invoices=1)).invoices
         if len(invoice_data) > 0 and open_invoice.r_hash == invoice_data[0].r_hash.hex():
             update_invoice(stub, invoice_data[0], open_invoice)
@@ -126,7 +126,7 @@ def update_invoices(stub):
     last_index = Invoices.objects.aggregate(Max('index'))['index__max'] if Invoices.objects.exists() else 0
     invoices = stub.ListInvoices(ln.ListInvoiceRequest(index_offset=last_index, num_max_invoices=100)).invoices
     for invoice in invoices:
-        print (f"{datetime.now().strftime('%c')} : Processing invoice {invoice.add_index=} {invoice.settle_index=} {invoice.state=} {invoice.r_hash.hex()=}")
+        #print (f"{datetime.now().strftime('%c')} : Processing new invoice {invoice.add_index=} {invoice.settle_index=} {invoice.state=} {invoice.r_hash.hex()=}")
         db_invoice = Invoices(creation_date=datetime.fromtimestamp(invoice.creation_date), r_hash=invoice.r_hash.hex(), value=round(invoice.value_msat/1000, 3), amt_paid=invoice.amt_paid_sat, state=invoice.state, index=invoice.add_index)
         db_invoice.save()
         update_invoice(stub, invoice, db_invoice)
@@ -473,7 +473,7 @@ def clean_payments(stub):
                 print (f"{datetime.now().strftime('%c')} : Cleaned {payment.index=} {payment.status=} {payment.cleaned=} {payment.payment_hash=}")
 
 def auto_fees(stub):
-    print (f"{datetime.now().strftime('%c')} : Processing Auto Fees")
+    #print (f"{datetime.now().strftime('%c')} : Processing Auto Fees")
     if LocalSettings.objects.filter(key='AF-Enabled').exists():
         enabled = int(LocalSettings.objects.filter(key='AF-Enabled')[0].value)
     else:
@@ -549,7 +549,7 @@ def auto_fees(stub):
                 channels_df['costs_7day'] = channels_df.apply(lambda row: 0 if row['amt_rebal_in_7day'] == 0 else int(payments_df_7d.set_index('payment_hash', inplace=False).loc[invoice_hashes_7d[row.chan_id] if invoice_hashes_7d.empty == False and (invoice_hashes_7d.index == row.chan_id).any() else []]['fee'].sum()), axis=1)
                 channels_df['rebal_ppm'] = channels_df.apply(lambda row: int((row['costs_7day']/row['amt_rebal_in_7day'])*1000000) if row['amt_rebal_in_7day'] > 0 else row['local_fee_rate'], axis=1)
                 channels_df['profit_margin'] = channels_df.apply(lambda row: row['out_rate']*((100-row['ar_max_cost'])/100), axis=1)
-                channels_df['max_suggestion'] = channels_df.apply(lambda row: int((row['rebal_ppm']+row['profit_margin'] if row['out_rate'] > 0 else row['local_fee_rate'])*(1+limit_change)) if row['in_percent'] > up_level else int(row['local_fee_rate']), axis=1)
+                channels_df['max_suggestion'] = channels_df.apply(lambda row: int((max(row['rebal_ppm']+row['profit_margin'], row['out_rate']) if row['out_rate'] > 0 else row['local_fee_rate'])*(1+limit_change)) if row['in_percent'] > up_level else int(row['local_fee_rate']), axis=1)
                 channels_df['max_suggestion'] = channels_df.apply(lambda row: row['local_fee_rate']*(1+limit_change) if row['max_suggestion'] > (row['local_fee_rate']*(1+limit_change)) or row['max_suggestion'] == 0 else row['max_suggestion'], axis=1)
                 channels_df['min_suggestion'] = channels_df.apply(lambda row: int((row['rebal_ppm'] if row['out_rate'] > 0 else row['local_fee_rate'])*(1-limit_change)) if row['out_percent'] > down_level else int(row['local_fee_rate']), axis=1)
                 channels_df['min_suggestion'] = channels_df.apply(lambda row: row['local_fee_rate']*(1-limit_change) if row['min_suggestion'] < (row['local_fee_rate']*(1-limit_change)) else row['min_suggestion'], axis=1)
