@@ -434,10 +434,10 @@ def reconnect_peers(stub):
                             print (f"{datetime.now().strftime('%c')} : .... Error disconnecting {peer.alias} {inactive_peer=} {str(e)=}")
 
                     try:
-                        node = stub.GetNodeInfo(ln.NodeInfoRequest(pub_key=inactive_peer, include_channels=False)).node
-                        host = node.addresses[0].addr
+                        response = stub.GetNodeInfo(ln.NodeInfoRequest(pub_key=inactive_peer, include_channels=False))
+                        host = response.node.addresses[0].addr
                     except Exception as e:
-                        print (f"{datetime.now().strftime('%c')} : ... Unable to find node info on graph, using last known value {peer.alias=} {peer.pubkey=} {peer.address=} {str(e)=}")
+                        print (f"{datetime.now().strftime('%c')} : ... Unable to get recent address on graph, using last known value {peer.alias=} {peer.pubkey=} {peer.address=} {str(e)=} {response=}")
                         host = peer.address
                     address = ln.LightningAddress(pubkey=inactive_peer, host=host)
                     print (f"{datetime.now().strftime('%c')} : ... Attempting connection to {peer.alias=} {inactive_peer=} {host=}")
@@ -556,7 +556,7 @@ def auto_fees(stub):
                 channels_df['amt_rebal_in_7day'] = channels_df.apply(lambda row: int(invoices_df_7d_sum.loc[row.chan_id].amt_paid) if invoices_df_7d_sum.empty == False and (invoices_df_7d_sum.index == row.chan_id).any() else 0, axis=1)
                 channels_df['costs_7day'] = channels_df.apply(lambda row: 0 if row['amt_rebal_in_7day'] == 0 else int(payments_df_7d.set_index('payment_hash', inplace=False).loc[invoice_hashes_7d[row.chan_id] if invoice_hashes_7d.empty == False and (invoice_hashes_7d.index == row.chan_id).any() else []]['fee'].sum()), axis=1)
                 channels_df['rebal_ppm'] = channels_df.apply(lambda row: int((row['costs_7day']/row['amt_rebal_in_7day'])*1000000) if row['amt_rebal_in_7day'] > 0 else row['local_fee_rate'], axis=1)
-                channels_df['profit_margin'] = channels_df.apply(lambda row: row['out_rate']*((100-row['ar_max_cost'])/100), axis=1)
+                channels_df['profit_margin'] = channels_df.apply(lambda row: max(row['out_rate'], row['local_fee_rate'])*((100-row['ar_max_cost'])/100), axis=1)
                 channels_df['max_suggestion'] = channels_df.apply(lambda row: int((max(row['rebal_ppm']+row['profit_margin'], row['out_rate']) if row['out_rate'] > 0 else row['local_fee_rate'])*(1+limit_change)) if row['in_percent'] > up_level else int(row['local_fee_rate']), axis=1)
                 channels_df['max_suggestion'] = channels_df.apply(lambda row: row['local_fee_rate']*(1+limit_change) if row['max_suggestion'] > (row['local_fee_rate']*(1+limit_change)) or row['max_suggestion'] == 0 else row['max_suggestion'], axis=1)
                 channels_df['min_suggestion'] = channels_df.apply(lambda row: int((row['rebal_ppm'] if row['out_rate'] > 0 else row['local_fee_rate'])*(1-limit_change)) if row['out_percent'] > down_level else int(row['local_fee_rate']), axis=1)
