@@ -1688,7 +1688,7 @@ def open_channel_form(request):
                         error_msg = error[details_index:debug_error_index]
                         messages.error(request, 'Error connecting to new peer: ' + error_msg)
                 if connected:
-                    for response in stub.OpenChannel(ln.OpenChannelRequest(node_pubkey=bytes.fromhex(peer_pubkey), local_funding_amount=form.cleaned_data['local_amt'], sat_per_byte=form.cleaned_data['sat_per_byte'])):
+                    for response in stub.OpenChannel(ln.OpenChannelRequest(node_pubkey=bytes.fromhex(peer_pubkey), local_funding_amount=form.cleaned_data['local_amt'], sat_per_byte=form.cleaned_data['sat_per_byte'], min_confs=0, spend_unconfirmed=True)):
                         messages.success(request, 'Channel created! Funding TXID: ' + str(response.chan_pending.txid[::-1].hex()) + ':' + str(response.chan_pending.output_index))
                         break
             except Exception as e:
