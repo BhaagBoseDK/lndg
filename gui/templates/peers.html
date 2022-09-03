@@ -10,18 +10,22 @@
       <th width=40%>Peer PubKey</th>
       <th>Peer Alias</th>
       <th>Network Address</th>
+      <th>Connected</th>
       <th>Inbound</th>
       <th>Sats Sent</th>
       <th>Sats Received</th>
+      <th>Last ReConnect Attempt</th>
     </tr>
     {% for peer in peers %}
     <tr>
       <td><a href="{{ graph_links }}/{{ network }}node/{{ peer.pubkey }}" target="_blank">{{ peer.pubkey }}</a></td>
       <td>{% if peer.alias != '' %}{{ peer.alias }}{% else %}---{% endif %}</td>
       <td>{{ peer.address }}</td>
+      <td>{{ peer.connected }}</td>
       <td>{{ peer.inbound }}</td>
       <td>{{ peer.sat_sent|intcomma }}</td>
       <td>{{ peer.sat_recv|intcomma }}</td>
+      <td>{{ peer.last_reconnected|naturaltime }}</td>
     </tr>
     {% endfor %}
   </table>
