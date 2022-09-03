@@ -13,7 +13,6 @@ from requests import get
 environ['DJANGO_SETTINGS_MODULE'] = 'lndg.settings'
 django.setup()
 from gui.models import Payments, PaymentHops, Invoices, Forwards, Channels, Peers, Onchain, Closures, Resolutions, PendingHTLCs, LocalSettings, FailedHTLCs, Autofees, PendingChannels
-from lndg.settings import LND_NETWORK
 
 def update_payments(stub):
     self_pubkey = stub.GetInfo(ln.GetInfoRequest()).identity_pubkey
@@ -49,6 +48,8 @@ def update_payment(stub, payment, self_pubkey):
     db_payment.index = payment.payment_index
     if payment.status == 2 or payment.status == 1 or payment.status == 3:
         PaymentHops.objects.filter(payment_hash=db_payment).delete()
+        db_payment.chan_out = None
+        db_payment.rebal_chan = None
         for attempt in payment.htlcs:
             if attempt.status == 1 or attempt.status == 0 or (attempt.status == 2 and attempt.failure.code in (1,2,12)) :
                 hops = attempt.route.hops
