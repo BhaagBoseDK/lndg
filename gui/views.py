@@ -550,7 +550,7 @@ def routes(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def peers(request):
     if request.method == 'GET':
-        peers = Peers.objects.all().order_by('-connected', '-last_reconnected')
+        peers = Peers.objects.all().order_by('-connected', 'inbound', '-last_reconnected')
         context = {
             'peers': peers,
             'num_peers': len(peers),
