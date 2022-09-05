@@ -379,7 +379,7 @@ def network_links():
     return network_links
 
 def get_tx_fees(txid):
-    base_url = network_links() + ('/testnet' if LND_NETWORK == 'testnet' else '') + '/api/tx/'
+    base_url = network_links() + ('/testnet' if settings.LND_NETWORK == 'testnet' else '') + '/api/tx/'
     try:
         request_data = get(base_url + txid).json()
         fee = request_data['fee']
@@ -447,7 +447,7 @@ def reconnect_peers(stub):
                     address = ln.LightningAddress(pubkey=inactive_peer, host=host)
                     print (f"{datetime.now().strftime('%c')} : ... Attempting connection to {peer.alias=} {inactive_peer=} {host=}")
                     try:
-                        response = stub.ConnectPeer(request = ln.ConnectPeerRequest(addr=address, perm=False, timeout=5))
+                        response = stub.ConnectPeer(request = ln.ConnectPeerRequest(addr=address, perm=False, timeout=30))
                         print (f"{datetime.now().strftime('%c')} : .... Status {peer.alias=} {inactive_peer=} {response=}")
                     except Exception as e:
                         print (f"{datetime.now().strftime('%c')} : .... Error reconnecting {peer.alias} {inactive_peer=} {str(e)=}")
@@ -616,6 +616,6 @@ def main():
         auto_fees(stub)
     except Exception as e:
         print (f"{datetime.now().strftime('%c')} : Error processing background data: {str(e)=}")
-
+    #print (f"{datetime.now().strftime('%c')} : Exiting Jobs")
 if __name__ == '__main__':
     main()
