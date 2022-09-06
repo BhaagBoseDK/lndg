@@ -12,7 +12,7 @@ from pandas import DataFrame
 from requests import get
 environ['DJANGO_SETTINGS_MODULE'] = 'lndg.settings'
 django.setup()
-from gui.models import Payments, PaymentHops, Invoices, Forwards, Channels, Peers, Onchain, Closures, Resolutions, PendingHTLCs, LocalSettings, FailedHTLCs, Autofees, PendingChannels
+from gui.models import Payments, PaymentHops, Invoices, Forwards, Channels, Peers, Onchain, Closures, Resolutions, PendingHTLCs, LocalSettings, FailedHTLCs, Autofees, PendingChannels, Rebalancer
 
 def update_payments(stub):
     self_pubkey = stub.GetInfo(ln.GetInfoRequest()).identity_pubkey
@@ -104,6 +104,12 @@ def adjust_ar_amt( payment, chan_id ):
                 db_channel.ar_amt_target = new_ar_amount
                 db_channel.save()
     if payment.status == 3:
+        #skip rapid fire rebalances
+        last_rebalance_duration = Rebalancer.objects.filter(payment_hash=payment.payment_hash)[0].duration if Rebalancer.objects.filter(payment_hash=payment.payment_hash).exists() else 0
+        #print (f"{datetime.now().strftime('%c')} : DEBUG {last_rebalance_duration=} {payment.payment_hash=}")
+        if last_rebalance_duration <= 1:
+            print (f"{datetime.now().strftime('%c')} : Skipping Liquidiy Estimation {last_rebalance_duration=} {payment.payment_hash=}")
+            return
         estimated_liquidity = 0
         for attempt in payment.htlcs:
             total_hops=len(attempt.route.hops)
@@ -571,7 +577,7 @@ def auto_fees(stub):
                 channels_df['adjusted_rebal_rate'] = channels_df.apply(lambda row: int(row['rebal_ppm']+row['profit_margin']), axis=1)
                 channels_df['out_rate_only'] = channels_df.apply(lambda row: int(max(row['out_rate'],row['local_fee_rate']) * (1+row['net_routed_7day']*(multiplier/100))), axis=1)
                 channels_df['fee_rate_only'] = channels_df.apply(lambda row: int(row['local_fee_rate']+row['net_routed_7day']*row['local_fee_rate']*(multiplier/100)), axis=1)
-                channels_df['new_rate'] = channels_df.apply(lambda row: row['adjusted_out_rate'] if row['net_routed_7day'] != 0 else (row['adjusted_rebal_rate'] if row['rebal_ppm'] > 0 and row['out_rate'] > 0 else (row['out_rate_only'] if row['out_rate'] > 0 else (row['min_suggestion'] if row['net_routed_7day'] <= 0 and row['in_percent'] < down_level else row['fee_rate_only']))), axis=1)
+                channels_df['new_rate'] = channels_df.apply(lambda row: row['adjusted_out_rate'] if row['net_routed_7day'] >= 0 else (row['adjusted_rebal_rate'] if row['rebal_ppm'] > 0 and row['out_rate'] > 0 else (row['out_rate_only'] if row['out_rate'] > 0 else (row['min_suggestion'] if row['net_routed_7day'] <= 0 and row['in_percent'] < down_level else row['fee_rate_only']))), axis=1)
                 channels_df['new_rate'] = channels_df.apply(lambda row: 0 if row['new_rate'] < 0 else row['new_rate'], axis=1)
                 channels_df['adjustment'] = channels_df.apply(lambda row: int(row['new_rate']-row['local_fee_rate']), axis=1)
                 channels_df['new_rate'] = channels_df.apply(lambda row: row['local_fee_rate']*(1-0.021) if row['adjustment']==0 and row['out_percent']>=down_level and row['net_routed_7day']==0 else row['local_fee_rate'], axis=1)
