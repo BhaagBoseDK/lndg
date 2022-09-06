@@ -37,11 +37,11 @@ def run_rebalancer(rebalance):
         invoice_response = stub.AddInvoice(ln.Invoice(value=rebalance.value, expiry=timeout))
         print (f"{datetime.now().strftime('%c')} : Rebalance for {rebalance.target_alias=} {rebalance.last_hop_pubkey=} {rebalance.value=} {rebalance.duration=} via {chan_ids=}", sep=' : ' )
         #Save with inflight status
-        rebalance.status = 1
+        rebalance.status = 0
         rebalance.payment_hash = ''
-        rebalance.save()
-        for payment_response in routerstub.SendPaymentV2(lnr.SendPaymentRequest(payment_request=str(invoice_response.payment_request), fee_limit_msat=int(rebalance.fee_limit*1000), outgoing_chan_ids=chan_ids, last_hop_pubkey=bytes.fromhex(rebalance.last_hop_pubkey), timeout_seconds=(timeout-5), allow_self_payment=True, no_inflight_updates=True), timeout=(timeout+60)):
-            print (f"{datetime.now().strftime('%c')} : Payment Response {payment_response.status=} {payment_response.fee_msat/1000=} {payment_response.failure_reason=} {payment_response.payment_hash=}", sep=' : ' )
+        #rebalance.save()
+        for payment_response in routerstub.SendPaymentV2(lnr.SendPaymentRequest(payment_request=str(invoice_response.payment_request), fee_limit_msat=int(rebalance.fee_limit*1000), outgoing_chan_ids=chan_ids, last_hop_pubkey=bytes.fromhex(rebalance.last_hop_pubkey), timeout_seconds=(timeout-5), allow_self_payment=True, no_inflight_updates=False), timeout=(timeout+60)):
+            #print (f"{datetime.now().strftime('%c')} : DEBUG Payment Response {payment_response.status=} {payment_response.fee_msat/1000=} {payment_response.failure_reason=} {payment_response.payment_hash=}", sep=' : ' )
             rebalance.payment_hash = payment_response.payment_hash
             if payment_response.status == 1 and rebalance.status == 0:
                 #IN-FLIGHT
@@ -175,7 +175,7 @@ def auto_schedule():
                             print('Target Value:', target_value, '/', target.ar_amt_target)
                             print('Target Fee:', target_fee)
                             print('Target Time:', target_time)
-                            Rebalancer(value=target_value, fee_limit=target_fee, outgoing_chan_ids=str(outbound_cans).replace('\'', ''), last_hop_pubkey=target.remote_pubkey, target_alias=target.alias, duration=target_time).save()
+                            Rebalancer(value=target_value, fee_limit=target_fee, outgoing_chan_ids=str(outbound_cans).replace('\'', ''), last_hop_pubkey=target.remote_pubkey, target_alias=target.alias, duration=target_time, payment_hash="").save()
 
 def auto_enable():
     if LocalSettings.objects.filter(key='AR-Autopilot').exists():
