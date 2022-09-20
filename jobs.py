@@ -162,7 +162,7 @@ def update_invoice(stub, invoice, db_invoice):
             keysend_preimage = records[5482373484].hex() if 5482373484 in records else None
             message = records[34349334].decode('utf-8', errors='ignore')[:1000] if 34349334 in records else None
             if 34349337 in records and 34349339 in records and 34349343 in records and 34349334 in records:
-                signerstub = lnsigner.SignerStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                signerstub = lnsigner.SignerStub(lnd_connect())
                 self_pubkey = stub.GetInfo(ln.GetInfoRequest()).identity_pubkey
                 try:
                     valid = signerstub.VerifyMessage(lns.VerifyMessageReq(msg=(records[34349339]+bytes.fromhex(self_pubkey)+records[34349343]+records[34349334]), signature=records[34349337], pubkey=records[34349339])).valid
@@ -451,10 +451,10 @@ def reconnect_peers(stub):
                             print (f"{datetime.now().strftime('%c')} : .... Error disconnecting {peer.alias} {inactive_peer=} {str(e)=}")
 
                     try:
-                        response = stub.GetNodeInfo(ln.NodeInfoRequest(pub_key=inactive_peer, include_channels=False))
-                        host = response.node.addresses[0].addr
+                        node = stub.GetNodeInfo(ln.NodeInfoRequest(pub_key=inactive_peer, include_channels=False)).node
+                        host = node.addresses[0].addr
                     except Exception as e:
-                        print (f"{datetime.now().strftime('%c')} : ... Unable to get recent address on graph, using last known value {peer.alias=} {peer.pubkey=} {peer.address=} {str(e)=} {response=}")
+                        print (f"{datetime.now().strftime('%c')} : ... Unable to find node info on graph, using last known value {peer.alias=} {peer.pubkey=} {peer.address=} {str(e)=}")
                         host = peer.address
                     address = ln.LightningAddress(pubkey=inactive_peer, host=host)
                     print (f"{datetime.now().strftime('%c')} : ... Attempting connection to {peer.alias=} {inactive_peer=} {host=}")
@@ -614,7 +614,7 @@ def main():
     #print (f"{datetime.now().strftime('%c')} : Entering Jobs")
     time.sleep(60)
     try:
-        stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+        stub = lnrpc.LightningStub(lnd_connect())
         #Update data
         update_peers(stub)
         update_channels(stub)

@@ -3,12 +3,11 @@ from django.shortcuts import get_object_or_404, render, redirect
 from django.db.models import Sum, IntegerField, Count, F, Q
 from django.db.models.functions import Round
 from django.contrib.auth.decorators import login_required
-from django.conf import settings
 from datetime import datetime, timedelta
 from rest_framework import viewsets
 from rest_framework.response import Response
 from rest_framework.decorators import api_view
-from .forms import OpenChannelForm, CloseChannelForm, ConnectPeerForm, AddInvoiceForm, RebalancerForm, ChanPolicyForm, UpdateChannel, UpdateSetting, AutoRebalanceForm, AddTowerForm, RemoveTowerForm, DeleteTowerForm, BatchOpenForm, UpdatePending
+from .forms import OpenChannelForm, CloseChannelForm, ConnectPeerForm, AddInvoiceForm, RebalancerForm, ChanPolicyForm, UpdateChannel, UpdateSetting, AutoRebalanceForm, AddTowerForm, RemoveTowerForm, DeleteTowerForm, BatchOpenForm, UpdatePending, UpdateClosing
 from .models import Payments, PaymentHops, Invoices, Forwards, Channels, Rebalancer, LocalSettings, Peers, Onchain, Closures, Resolutions, PendingHTLCs, FailedHTLCs, Autopilot, Autofees, PendingChannels
 from .serializers import ConnectPeerSerializer, FailedHTLCSerializer, LocalSettingsSerializer, OpenChannelSerializer, CloseChannelSerializer, AddInvoiceSerializer, PaymentHopsSerializer, PaymentSerializer, InvoiceSerializer, ForwardSerializer, ChannelSerializer, PendingHTLCSerializer, RebalancerSerializer, UpdateAliasSerializer, PeerSerializer, OnchainSerializer, ClosuresSerializer, ResolutionsSerializer
 from gui.lnd_deps import lightning_pb2 as ln
@@ -18,9 +17,10 @@ from gui.lnd_deps import router_pb2_grpc as lnrouter
 from gui.lnd_deps import wtclient_pb2 as wtrpc
 from gui.lnd_deps import wtclient_pb2_grpc as wtstub
 from .lnd_deps.lnd_connect import lnd_connect
-from lndg.settings import LND_NETWORK, LND_DIR_PATH
+from lndg import settings
 from os import path
 from pandas import DataFrame, merge
+from requests import get
 
 def graph_links():
     if LocalSettings.objects.filter(key='GUI-GraphLinks').exists():
@@ -38,11 +38,17 @@ def network_links():
         network_links = 'https://mempool.space'
     return network_links
 
+def get_tx_fees(txid):
+    base_url = network_links() + ('/testnet' if settings.LND_NETWORK == 'testnet' else '') + '/api/tx/'
+    request_data = get(base_url + txid).json()
+    fee = request_data['fee']
+    return fee
+
 @login_required(login_url='/lndg-admin/login/?next=/')
 def home(request):
     if request.method == 'GET':
         try:
-            stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+            stub = lnrpc.LightningStub(lnd_connect())
             #Get balance and general node information
             node_info = stub.GetInfo(ln.GetInfoRequest())
             balances = stub.WalletBalance(ln.WalletBalanceRequest())
@@ -205,8 +211,8 @@ def home(request):
             onchain_txs = Onchain.objects.all()
             onchain_costs_7day = 0 if onchain_txs.filter(time_stamp__gte=filter_7day).count() == 0 else onchain_txs.filter(time_stamp__gte=filter_7day).aggregate(Sum('fee'))['fee__sum']
             onchain_costs_1day = 0 if onchain_txs.filter(time_stamp__gte=filter_1day).count() == 0 else onchain_txs.filter(time_stamp__gte=filter_1day).aggregate(Sum('fee'))['fee__sum']
-            closures_7day = channels.filter(chan_id__in=Closures.objects.filter(close_height__gte=(node_info.block_height - 1008)).values('chan_id'))
-            closures_1day = channels.filter(chan_id__in=Closures.objects.filter(close_height__gte=(node_info.block_height - 144)).values('chan_id'))
+            closures_7day = Closures.objects.filter(close_height__gte=(node_info.block_height - 1008))
+            closures_1day = Closures.objects.filter(close_height__gte=(node_info.block_height - 144))
             close_fees_7day = closures_7day.aggregate(Sum('closing_costs'))['closing_costs__sum'] if closures_7day.exists() else 0
             close_fees_1day = closures_1day.aggregate(Sum('closing_costs'))['closing_costs__sum'] if closures_1day.exists() else 0
             onchain_costs_7day += close_fees_7day
@@ -218,7 +224,7 @@ def home(request):
             total_channels = node_info.num_active_channels + node_info.num_inactive_channels - private_count
             local_settings = LocalSettings.objects.filter(key__contains='AR-').order_by('key')
             try:
-                db_size = round(path.getsize(path.expanduser(LND_DIR_PATH + '/data/graph/' + LND_NETWORK + '/channel.db'))*0.000000001, 3)
+                db_size = round(path.getsize(path.expanduser(settings.LND_DATABASE_PATH))*0.000000001, 3)
             except:
                 db_size = 0
             #Build context for front-end and render page
@@ -283,7 +289,7 @@ def home(request):
                 'eligible_count': channels.filter(is_active=True, is_open=True, private=False, auto_rebalance=True).annotate(inbound_can=((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity')).annotate(fee_ratio=(Sum('remote_fee_rate')*100)/Sum('local_fee_rate')).filter(inbound_can__gte=F('ar_in_target'), fee_ratio__lte=F('ar_max_cost')).count(),
                 'enabled_count': channels.filter(is_open=True, auto_rebalance=True).count(),
                 'available_count': channels.filter(is_active=True, is_open=True, private=False, auto_rebalance=False).annotate(outbound_can=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).filter(outbound_can__gte=F('ar_out_target')).count(),
-                'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+                'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
                 'graph_links': graph_links(),
                 'network_links': network_links(),
                 'db_size': db_size,
@@ -386,7 +392,7 @@ def channels(request):
             'channels': [] if channels_df.empty else channels_df.sort_values(by=['cv_30day'], ascending=False).to_dict(orient='records')[:69],
             'apy_7day': apy_7day,
             'apy_30day': apy_30day,
-            'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+            'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links(),
             'network_links': network_links()
         }
@@ -479,7 +485,7 @@ def fees(request):
         context = {
             'channels': [] if channels_df.empty else channels_df.sort_values(by=['out_percent']).to_dict(orient='records'),
             'local_settings': LocalSettings.objects.filter(key__contains='AF-').order_by('key'),
-            'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+            'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links(),
             'network_links': network_links()
         }
@@ -501,7 +507,7 @@ def advanced(request):
         context = {
             'channels': channels_df.to_dict(orient='records'),
             'local_settings': LocalSettings.objects.all().order_by('key'),
-            'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+            'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links(),
             'network_links': network_links()
         }
@@ -513,7 +519,7 @@ def advanced(request):
 def route(request):
     if request.method == 'GET':
         try:
-            stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+            stub = lnrpc.LightningStub(lnd_connect())
             block_height = stub.GetInfo(ln.GetInfoRequest()).block_height
             payment_hash = request.GET.urlencode()[1:]
             context = {
@@ -554,7 +560,7 @@ def peers(request):
         context = {
             'peers': peers,
             'num_peers': len(peers),
-            'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+            'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links()
         }
         return render(request, 'peers.html', context)
@@ -564,11 +570,11 @@ def peers(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def balances(request):
     if request.method == 'GET':
-        stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+        stub = lnrpc.LightningStub(lnd_connect())
         context = {
             'utxos': stub.ListUnspent(ln.ListUnspentRequest(min_confs=0, max_confs=9999999)).utxos,
             'transactions': list(Onchain.objects.filter(block_height=0)) + list(Onchain.objects.exclude(block_height=0).order_by('-block_height')),
-            'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+            'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'network_links': network_links()
         }
         return render(request, 'balances.html', context)
@@ -579,7 +585,7 @@ def balances(request):
 def closures(request):
     if request.method == 'GET':
         try:
-            stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+            stub = lnrpc.LightningStub(lnd_connect())
             pending_channels = stub.PendingChannels(ln.PendingChannelsRequest())
             channels = Channels.objects.all()
             pending_closed = None
@@ -598,20 +604,19 @@ def closures(request):
             if closures_df.empty:
                 merged = DataFrame()
             else:
-                channels_df = DataFrame.from_records(Channels.objects.all().values('chan_id', 'alias', 'closing_costs'))
+                channels_df = DataFrame.from_records(Channels.objects.all().values('chan_id', 'alias'))
                 if channels_df.empty:
                     merged = closures_df
                     merged['alias'] = ''
                 else:
                     merged = merge(closures_df, channels_df, on='chan_id', how='left')
                     merged['alias'] = merged['alias'].fillna('')
-                    merged['closing_costs'] = merged['closing_costs'].fillna('')
             context = {
                 'pending_closed': pending_closed,
                 'pending_force_closed': pending_force_closed,
                 'waiting_for_close': waiting_for_close,
                 'closures': [] if merged.empty else merged.sort_values(by=['close_height'], ascending=False).to_dict(orient='records'),
-                'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+                'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
                 'network_links': network_links(),
                 'graph_links': graph_links()
             }
@@ -639,7 +644,7 @@ def find_next_block_maturity(force_closing_channel):
 def towers(request):
     if request.method == 'GET':
         try:
-            stub = wtstub.WatchtowerClientStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+            stub = wtstub.WatchtowerClientStub(lnd_connect())
             towers = stub.ListTowers(wtrpc.ListTowersRequest(include_sessions=False)).towers
             active_towers = []
             inactive_towers = []
@@ -673,7 +678,7 @@ def add_tower_form(request):
         form = AddTowerForm(request.POST)
         if form.is_valid():
             try:
-                stub = wtstub.WatchtowerClientStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = wtstub.WatchtowerClientStub(lnd_connect())
                 tower = form.cleaned_data['tower']
                 if tower.count('@') == 1 and len(tower.split('@')[0]) == 66:
                     peer_pubkey, host = tower.split('@')
@@ -697,7 +702,7 @@ def delete_tower_form(request):
         form = DeleteTowerForm(request.POST)
         if form.is_valid():
             try:
-                stub = wtstub.WatchtowerClientStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = wtstub.WatchtowerClientStub(lnd_connect())
                 pubkey = bytes.fromhex(form.cleaned_data['pubkey'])
                 address = form.cleaned_data['address']
                 response = stub.RemoveTower(wtrpc.RemoveTowerRequest(pubkey=pubkey, address=address))
@@ -718,7 +723,7 @@ def remove_tower_form(request):
         form = RemoveTowerForm(request.POST)
         if form.is_valid():
             try:
-                stub = wtstub.WatchtowerClientStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = wtstub.WatchtowerClientStub(lnd_connect())
                 pubkey = bytes.fromhex(form.cleaned_data['pubkey'])
                 response = stub.RemoveTower(wtrpc.RemoveTowerRequest(pubkey=pubkey))
                 messages.success(request, 'Tower removal successful!' + str(response))
@@ -739,7 +744,7 @@ def resolutions(request):
         context = {
             'chan_id': chan_id,
             'resolutions': Resolutions.objects.filter(chan_id=chan_id),
-            'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+            'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'network_links': network_links()
         }
         return render(request, 'resolutions.html', context)
@@ -749,13 +754,12 @@ def resolutions(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def income(request):
     if request.method == 'GET':
-        stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+        stub = lnrpc.LightningStub(lnd_connect())
         filter_90day = datetime.now() - timedelta(days=90)
         filter_30day = datetime.now() - timedelta(days=30)
         filter_7day = datetime.now() - timedelta(days=7)
         filter_1day = datetime.now() - timedelta(days=1)
         node_info = stub.GetInfo(ln.GetInfoRequest())
-        channels = Channels.objects.all()
         payments = Payments.objects.filter(status=2)
         payments_90day = payments.filter(creation_date__gte=filter_90day)
         payments_30day = payments.filter(creation_date__gte=filter_30day)
@@ -766,11 +770,11 @@ def income(request):
         onchain_txs_30day = onchain_txs.filter(time_stamp__gte=filter_30day)
         onchain_txs_7day = onchain_txs.filter(time_stamp__gte=filter_7day)
         onchain_txs_1day = onchain_txs.filter(time_stamp__gte=filter_1day)
-        closures = channels.filter(chan_id__in=Closures.objects.all().values('chan_id'))
-        closures_90day = channels.filter(chan_id__in=Closures.objects.filter(close_height__gte=(node_info.block_height - 12960)).values('chan_id'))
-        closures_30day = channels.filter(chan_id__in=Closures.objects.filter(close_height__gte=(node_info.block_height - 4320)).values('chan_id'))
-        closures_7day = channels.filter(chan_id__in=Closures.objects.filter(close_height__gte=(node_info.block_height - 1008)).values('chan_id'))
-        closures_1day = channels.filter(chan_id__in=Closures.objects.filter(close_height__gte=(node_info.block_height - 144)).values('chan_id'))
+        closures = Closures.objects.all()
+        closures_90day = Closures.objects.filter(close_height__gte=(node_info.block_height - 12960))
+        closures_30day = Closures.objects.filter(close_height__gte=(node_info.block_height - 4320))
+        closures_7day = Closures.objects.filter(close_height__gte=(node_info.block_height - 1008))
+        closures_1day = Closures.objects.filter(close_height__gte=(node_info.block_height - 144))
         forwards = Forwards.objects.all()
         forwards_90day = forwards.filter(forward_date__gte=filter_90day)
         forwards_30day = forwards.filter(forward_date__gte=filter_30day)
@@ -883,7 +887,7 @@ def income(request):
             'percent_cost_30day': 0 if total_revenue_30day == 0 else int(((total_fees_30day+onchain_costs_30day)/total_revenue_30day)*100),
             'percent_cost_7day': 0 if total_revenue_7day == 0 else int(((total_fees_7day+onchain_costs_7day)/total_revenue_7day)*100),
             'percent_cost_1day': 0 if total_revenue_1day == 0 else int(((total_fees_1day+onchain_costs_1day)/total_revenue_1day)*100),
-            'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+            'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links()
         }
         return render(request, 'income.html', context)
@@ -1156,7 +1160,7 @@ def channel(request):
                     channels_df['costs_30day'] = 0 if channels_df['rebal_in_30day'][0] == 0 or invoice_hashes_30d.empty == True else int(rebal_payments_df_30d.set_index('payment_hash', inplace=False).loc[invoice_hashes_30d[chan_id]]['fee'].sum())
                     channels_df['costs_7day'] = 0 if channels_df['rebal_in_7day'][0] == 0 or invoice_hashes_7d.empty == True else int(rebal_payments_df_7d.set_index('payment_hash', inplace=False).loc[invoice_hashes_7d[chan_id]]['fee'].sum())
                     channels_df['costs_1day'] = 0 if channels_df['rebal_in_1day'][0] == 0 or invoice_hashes_1d.empty == True else int(rebal_payments_df_1d.set_index('payment_hash', inplace=False).loc[invoice_hashes_1d[chan_id]]['fee'].sum())
-            channels_df['costs'] +=  channels_df['closing_costs']
+            channels_df['costs'] += Closures.objects.filter(funding_txid=channels_df['funding_txid'][0],funding_index=channels_df['output_index'][0])[0].closing_costs if Closures.objects.filter(funding_txid=channels_df['funding_txid'][0],funding_index=channels_df['output_index'][0]).exists() else 0
             channels_df['profits'] = channels_df['revenue'] - channels_df['costs']
             channels_df['profits_30day'] = channels_df['revenue_30day'] - channels_df['costs_30day']
             channels_df['profits_7day'] = channels_df['revenue_7day'] - channels_df['costs_7day']
@@ -1268,7 +1272,7 @@ def channel(request):
             'rebalances': [] if rebalancer_df.empty else rebalancer_df.to_dict(orient='records')[:21],
             'failed_htlcs': [] if failed_htlc_df.empty else failed_htlc_df.to_dict(orient='records')[:21],
             'peer_info': [] if peer_info_df.empty else peer_info_df.to_dict(orient='records')[0],
-            'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+            'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links(),
             'network_links': network_links()
         }
@@ -1286,7 +1290,7 @@ def channel(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def opens(request):
     if request.method == 'GET':
-        stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+        stub = lnrpc.LightningStub(lnd_connect())
         self_pubkey = stub.GetInfo(ln.GetInfoRequest()).identity_pubkey
         current_peers = Channels.objects.filter(is_open=True).values_list('remote_pubkey')
         filter_60day = datetime.now() - timedelta(days=60)
@@ -1294,7 +1298,7 @@ def opens(request):
         open_list = PaymentHops.objects.filter(payment_hash__in=payments_60day).exclude(node_pubkey=self_pubkey).exclude(node_pubkey__in=current_peers).values('node_pubkey', 'alias').annotate(ppm=(Sum('fee')/Sum('amt'))*1000000).annotate(score=Round((Round(Count('id')/5, output_field=IntegerField())+Round(Sum('amt')/500000, output_field=IntegerField()))/10, output_field=IntegerField())).annotate(count=Count('id')).annotate(amount=Sum('amt')).annotate(fees=Sum('fee')).annotate(sum_cost_to=Sum('cost_to')/(Sum('amt')/1000000)).exclude(score=0).order_by('-score', 'ppm')[:21]
         context = {
             'open_list': open_list,
-            'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+            'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links()
         }
         return render(request, 'open_list.html', context)
@@ -1354,7 +1358,7 @@ def actions(request):
                 action_list.append(result)
         context = {
             'action_list': action_list,
-            'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+            'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links(),
             'network_links': network_links()
         }
@@ -1365,7 +1369,7 @@ def actions(request):
 @login_required(login_url='/lndg-admin/login/?next=/')
 def pending_htlcs(request):
     if request.method == 'GET':
-        stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+        stub = lnrpc.LightningStub(lnd_connect())
         block_height = stub.GetInfo(ln.GetInfoRequest()).block_height
         context = {
             'incoming_htlcs': PendingHTLCs.objects.filter(incoming=True).annotate(blocks_til_expiration=Sum('expiration_height')-block_height).annotate(hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('hash_lock'),
@@ -1468,7 +1472,7 @@ def batch_open(request):
             count = 0
             fail = False
             open_list = []
-            stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+            stub = lnrpc.LightningStub(lnd_connect())
             if form.cleaned_data['pubkey1'] and form.cleaned_data['amt1'] and len(form.cleaned_data['pubkey1']) == 66:
                 count += 1
                 peer_pubkey = form.cleaned_data['pubkey1']
@@ -1602,6 +1606,8 @@ def rebalancing(request):
         channels_df = DataFrame.from_records(Channels.objects.filter(is_open=True, private=False).annotate(percent_inbound=((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity')).annotate(percent_outbound=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).order_by('-is_active', 'percent_outbound').values())
         if channels_df.shape[0] > 0:
             channels_df['inbound_can'] = channels_df['percent_inbound'] / channels_df['ar_in_target']
+            channels_df['local_balance'] = channels_df['local_balance'] + channels_df['pending_outbound']
+            channels_df['remote_balance'] = channels_df['remote_balance'] + channels_df['pending_inbound']
             channels_df['fee_ratio'] = channels_df.apply(lambda row: 100 if row['local_fee_rate'] == 0 else int(round(((row['remote_fee_rate']/row['local_fee_rate'])*1000)/10, 0)), axis=1)
             channels_df['fee_check'] = channels_df.apply(lambda row: 1 if row['ar_max_cost'] == 0 else int(round(((row['fee_ratio']/row['ar_max_cost'])*1000)/10, 0)), axis=1)
             channels_df['steps'] = channels_df.apply(lambda row: 0 if row['inbound_can'] < 1 else int(((row['percent_inbound']-row['ar_in_target'])/((row['ar_amt_target']/row['capacity'])*100))+0.999), axis=1)
@@ -1627,7 +1633,7 @@ def rebalancing(request):
             'rebalancer': Rebalancer.objects.all().annotate(ppm=Round((Sum('fee_limit')*1000000)/Sum('value'), output_field=IntegerField())).order_by('-id')[:69],
             'rebalancer_form': RebalancerForm,
             'local_settings': LocalSettings.objects.filter(key__contains='AR-').order_by('key'),
-            'network': 'testnet/' if LND_NETWORK == 'testnet' else '',
+            'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links()
         }
         return render(request, 'rebalancing.html', context)
@@ -1686,7 +1692,7 @@ def open_channel_form(request):
         form = OpenChannelForm(request.POST)
         if form.is_valid():
             try:
-                stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrpc.LightningStub(lnd_connect())
                 peer_pubkey = form.cleaned_data['peer_pubkey']
                 connected = False
                 if Peers.objects.filter(pubkey=peer_pubkey, connected=True).exists():
@@ -1734,7 +1740,7 @@ def close_channel_form(request):
                     channel_point.funding_txid_bytes = bytes.fromhex(funding_txid)
                     channel_point.funding_txid_str = funding_txid
                     channel_point.output_index = output_index
-                    stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                    stub = lnrpc.LightningStub(lnd_connect())
                     if form.cleaned_data['force']:
                         for response in stub.CloseChannel(ln.CloseChannelRequest(channel_point=channel_point, force=True)):
                             messages.success(request, 'Channel force closed! Closing TXID: ' + str(response.close_pending.txid[::-1].hex()) + ':' + str(response.close_pending.output_index))
@@ -1761,7 +1767,7 @@ def connect_peer_form(request):
         form = ConnectPeerForm(request.POST)
         if form.is_valid():
             try:
-                stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrpc.LightningStub(lnd_connect())
                 peer_id = form.cleaned_data['peer_id']
                 if peer_id.count('@') == 0 and len(peer_id) == 66:
                     peer_pubkey = peer_id
@@ -1788,7 +1794,7 @@ def connect_peer_form(request):
 def new_address_form(request):
     if request.method == 'POST':
         try:
-            stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+            stub = lnrpc.LightningStub(lnd_connect())
             response = stub.NewAddress(ln.NewAddressRequest(type=0))
             messages.success(request, 'Deposit Address: ' + str(response.address))
         except Exception as e:
@@ -1805,7 +1811,7 @@ def add_invoice_form(request):
         form = AddInvoiceForm(request.POST)
         if form.is_valid():
             try:
-                stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrpc.LightningStub(lnd_connect())
                 response = stub.AddInvoice(ln.Invoice(value=form.cleaned_data['value']))
                 messages.success(request, 'Invoice created! ' + str(response.payment_request))
             except Exception as e:
@@ -1854,7 +1860,7 @@ def update_chan_policy(request):
         if form.is_valid():
             if form.cleaned_data['new_base_fee'] is not None or form.cleaned_data['new_fee_rate'] is not None or form.cleaned_data['new_cltv'] is not None:
                 try:
-                    stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                    stub = lnrpc.LightningStub(lnd_connect())
                     if form.cleaned_data['target_all']:
                         if form.cleaned_data['new_base_fee'] is not None and form.cleaned_data['new_fee_rate'] is not None and form.cleaned_data['new_cltv'] is not None:
                             args = {'global': True, 'base_fee_msat': form.cleaned_data['new_base_fee'], 'fee_rate': (form.cleaned_data['new_fee_rate']/1000000), 'time_lock_delta': form.cleaned_data['new_cltv']}
@@ -2055,7 +2061,7 @@ def update_channel(request):
             update_target = int(form.cleaned_data['update_target'])
             db_channel = Channels.objects.filter(chan_id=chan_id)[0]
             if update_target == 0:
-                stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrpc.LightningStub(lnd_connect())
                 channel_point = ln.ChannelPoint()
                 channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
                 channel_point.funding_txid_str = db_channel.funding_txid
@@ -2065,7 +2071,7 @@ def update_channel(request):
                 db_channel.save()
                 messages.success(request, 'Base fee for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(target))
             elif update_target == 1:
-                stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrpc.LightningStub(lnd_connect())
                 channel_point = ln.ChannelPoint()
                 channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
                 channel_point.funding_txid_str = db_channel.funding_txid
@@ -2096,7 +2102,7 @@ def update_channel(request):
                 db_channel.save()
                 messages.success(request, 'Auto rebalancer max cost for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(target) + '%')
             elif update_target == 7:
-                stub = lnrouter.RouterStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrouter.RouterStub(lnd_connect())
                 channel_point = ln.ChannelPoint()
                 channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
                 channel_point.funding_txid_str = db_channel.funding_txid
@@ -2112,7 +2118,7 @@ def update_channel(request):
                 db_channel.save()
                 messages.success(request, 'Auto fees status for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(db_channel.auto_fees))
             elif update_target == 9:
-                stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrpc.LightningStub(lnd_connect())
                 channel_point = ln.ChannelPoint()
                 channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
                 channel_point.funding_txid_str = db_channel.funding_txid
@@ -2121,10 +2127,6 @@ def update_channel(request):
                 db_channel.local_cltv = target
                 db_channel.save()
                 messages.success(request, 'CLTV for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(target))
-            elif update_target == 10:
-                db_channel.closing_costs = target
-                db_channel.save()
-                messages.success(request, 'Closing costs for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(db_channel.closing_costs))
             else:
                 messages.error(request, 'Invalid target code. Please try again.')
         else:
@@ -2346,7 +2348,7 @@ def update_setting(request):
                 messages.success(request, 'Updated payment cleanup retention days to: ' + str(retention_days))
             elif key == 'ALL-oRate':
                 target = int(value)
-                stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrpc.LightningStub(lnd_connect())
                 channels = Channels.objects.filter(is_open=True)
                 for db_channel in channels:
                     channel_point = ln.ChannelPoint()
@@ -2360,10 +2362,10 @@ def update_setting(request):
                 messages.success(request, 'Fee rate for all open channels updated to a value of: ' + str(target))
             elif key == 'ALL-oBase':
                 target = int(value)
-                stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrpc.LightningStub(lnd_connect())
                 channels = Channels.objects.filter(is_open=True)
                 for db_channel in channels:
-                    stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                    stub = lnrpc.LightningStub(lnd_connect())
                     channel_point = ln.ChannelPoint()
                     channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
                     channel_point.funding_txid_str = db_channel.funding_txid
@@ -2374,10 +2376,10 @@ def update_setting(request):
                 messages.success(request, 'Base fee for all channels updated to a value of: ' + str(target))
             elif key == 'ALL-CLTV':
                 target = int(value)
-                stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrpc.LightningStub(lnd_connect())
                 channels = Channels.objects.filter(is_open=True)
                 for db_channel in channels:
-                    stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                    stub = lnrpc.LightningStub(lnd_connect())
                     channel_point = ln.ChannelPoint()
                     channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
                     channel_point.funding_txid_str = db_channel.funding_txid
@@ -2476,6 +2478,40 @@ def update_setting(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
+@login_required(login_url='/lndg-admin/login/?next=/')
+def update_closing(request):
+    if request.method == 'POST':
+        form = UpdateClosing(request.POST)
+        if form.is_valid() and Closures.objects.filter(funding_txid=form.cleaned_data['funding_txid'], funding_index=form.cleaned_data['funding_index']).exists():
+            funding_txid = form.cleaned_data['funding_txid']
+            funding_index = form.cleaned_data['funding_index']
+            target = int(form.cleaned_data['target'])
+            db_closing = Closures.objects.filter(funding_txid=funding_txid, funding_index=funding_index)[0]
+            db_closing.closing_costs = target
+            db_closing.save()
+            messages.success(request, 'Updated closing costs for ' + str(funding_txid) + ':' + str(funding_index) + ' updated to a value of: ' + str(target))
+        else:
+            messages.error(request, 'Invalid Request. Please try again.')
+    return redirect(request.META.get('HTTP_REFERER'))
+
+@login_required(login_url='/lndg-admin/login/?next=/')
+def get_fees(request):
+    if request.method == 'GET':
+        missing_fees = Closures.objects.exclude(open_initiator=2, resolution_count=0).filter(closing_costs=0)
+        if missing_fees:
+            for missing_fee in missing_fees:
+                try:
+                    txid = missing_fee.closing_tx
+                    closing_costs = get_tx_fees(txid) if missing_fee.open_initiator == 1 else 0
+                    for resolution in Resolutions.objects.filter(chan_id=missing_fee.chan_id).exclude(resolution_type=2):
+                        closing_costs += get_tx_fees(resolution.sweep_txid)
+                    missing_fee.closing_costs = closing_costs
+                    missing_fee.save()
+                except Exception as error:
+                    messages.error(request, f"Error getting closure fees: {txid=} {error=}")
+                    return redirect(request.META.get('HTTP_REFERER'))
+    return redirect(request.META.get('HTTP_REFERER'))
+
 class PaymentsViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Payments.objects.all()
     serializer_class = PaymentSerializer
@@ -2559,7 +2595,7 @@ def connect_peer(request):
     serializer = ConnectPeerSerializer(data=request.data)
     if serializer.is_valid():
         try:
-            stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+            stub = lnrpc.LightningStub(lnd_connect())
             peer_id = serializer.validated_data['peer_id']
             if peer_id.count('@') == 0 and len(peer_id) == 66:
                 peer_pubkey = peer_id
@@ -2586,7 +2622,7 @@ def open_channel(request):
     serializer = OpenChannelSerializer(data=request.data)
     if serializer.is_valid():
         try:
-            stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+            stub = lnrpc.LightningStub(lnd_connect())
             peer_pubkey = serializer.validated_data['peer_pubkey']
             connected = False
             if Peers.objects.filter(pubkey=peer_pubkey, connected=True).exists():
@@ -2631,7 +2667,7 @@ def close_channel(request):
                 channel_point.funding_txid_bytes = bytes.fromhex(funding_txid)
                 channel_point.funding_txid_str = funding_txid
                 channel_point.output_index = output_index
-                stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrpc.LightningStub(lnd_connect())
                 if serializer.validated_data['force']:
                     for response in stub.CloseChannel(ln.CloseChannelRequest(channel_point=channel_point, force=True)):
                         return Response({'message': 'Channel force closed! Closing TXID: ' + str(response.close_pending.txid[::-1].hex()) + ':' + str(response.close_pending.output_index)})
@@ -2654,7 +2690,7 @@ def add_invoice(request):
     serializer = AddInvoiceSerializer(data=request.data)
     if serializer.is_valid() and serializer.validated_data['value'] >= 0:
         try:
-            stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+            stub = lnrpc.LightningStub(lnd_connect())
             response = stub.AddInvoice(ln.Invoice(value=serializer.validated_data['value']))
             return Response({'message': 'Invoice created!', 'data':str(response.payment_request)})
         except Exception as e:
@@ -2669,7 +2705,7 @@ def add_invoice(request):
 @api_view(['GET'])
 def new_address(request):
     try:
-        stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+        stub = lnrpc.LightningStub(lnd_connect())
         response = stub.NewAddress(ln.NewAddressRequest(type=0))
         return Response({'message': 'Retrieved new deposit address!', 'data':str(response.address)})
     except Exception as e:
@@ -2686,7 +2722,7 @@ def update_alias(request):
         peer_pubkey = serializer.validated_data['peer_pubkey']
         if Channels.objects.filter(remote_pubkey=peer_pubkey).exists():
             try:
-                stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+                stub = lnrpc.LightningStub(lnd_connect())
                 new_alias = stub.GetNodeInfo(ln.NodeInfoRequest(pub_key=peer_pubkey)).node.alias
                 update_channels = Channels.objects.filter(remote_pubkey=peer_pubkey)
                 for channel in update_channels:
@@ -2708,7 +2744,7 @@ def update_alias(request):
 @api_view(['GET'])
 def get_info(request):
     try:
-        stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+        stub = lnrpc.LightningStub(lnd_connect())
         response = stub.GetInfo(ln.GetInfoRequest())
         target = {'identity_pubkey':response.identity_pubkey, 'alias':response.alias, 'num_active_channels':response.num_active_channels, 'num_peers':response.num_peers, 'block_height':response.block_height, 'block_hash':response.block_hash,'synced_to_chain':response.synced_to_chain,'testnet':response.testnet,'uris':[uri for uri in response.uris],'best_header_timestamp':response.best_header_timestamp,'version':response.version,'num_inactive_channels':response.num_inactive_channels,'chains':[{'chain':response.chains[i].chain,'network':response.chains[i].network} for i in range(0,len(response.chains))],'color':response.color,'synced_to_graph':response.synced_to_graph}
         return Response({'message': 'success', 'data':target})
@@ -2722,9 +2758,18 @@ def get_info(request):
 @api_view(['GET'])
 def api_balances(request):
     try:
-        stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
-        response = stub.WalletBalance(ln.WalletBalanceRequest())
-        target = {'total_balance':response.confirmed_balance, 'confirmed_balance':response.confirmed_balance}
+        stub = lnrpc.LightningStub(lnd_connect())
+        balances = stub.WalletBalance(ln.WalletBalanceRequest())
+        pending_channels = stub.PendingChannels(ln.PendingChannelsRequest())
+        limbo_balance = pending_channels.total_limbo_balance
+        pending_open_balance = 0
+        if pending_channels.pending_open_channels:
+            target_resp = pending_channels.pending_open_channels
+            for i in range(0,len(target_resp)):
+                pending_open_balance += target_resp[i].channel.local_balance
+        channels = Channels.objects.filter(is_open=1)
+        offchain_balance = channels.aggregate(Sum('local_balance'))['local_balance__sum'] + channels.aggregate(Sum('pending_outbound'))['pending_outbound__sum'] + pending_open_balance + limbo_balance
+        target = {'total_balance':(balances.total_balance + offchain_balance),'offchain_balance':offchain_balance,'onchain_balance':balances.total_balance, 'confirmed_balance':balances.confirmed_balance, 'unconfirmed_balance':balances.unconfirmed_balance}
         return Response({'message': 'success', 'data':target})
     except Exception as e:
         error = str(e)
@@ -2734,9 +2779,54 @@ def api_balances(request):
         return Response({'error': 'Failed to get wallet balances! Error: ' + error_msg})
 
 @api_view(['GET'])
+def api_income(request):
+    try:
+        stub = lnrpc.LightningStub(lnd_connect())
+        try:
+            days = int(request.GET.urlencode()[1:])
+        except:
+            days = None
+        day_filter = datetime.now() - timedelta(days=days) if days else None
+        node_info = stub.GetInfo(ln.GetInfoRequest())
+        payments = Payments.objects.filter(status=2).filter(creation_date__gte=day_filter) if day_filter else Payments.objects.filter(status=2)
+        onchain_txs = Onchain.objects.filter(time_stamp__gte=day_filter) if day_filter else Onchain.objects.all()
+        closures = Closures.objects.filter(close_height__gte=(node_info.block_height - (days*144))) if days else Closures.objects.all()
+        forwards = Forwards.objects.filter(forward_date__gte=day_filter) if day_filter else Forwards.objects.all()
+        forward_count = forwards.count()
+        forward_amount = 0 if forward_count == 0 else int(forwards.aggregate(Sum('amt_out_msat'))['amt_out_msat__sum']/1000)
+        total_revenue = 0 if forward_count == 0 else int(forwards.aggregate(Sum('fee'))['fee__sum'])
+        total_revenue_ppm = 0 if forward_amount == 0 else int(total_revenue/(forward_amount/1000000))
+        total_sent = 0 if payments.count() == 0 else int(payments.aggregate(Sum('value'))['value__sum'])
+        total_fees = 0 if payments.count() == 0 else int(payments.aggregate(Sum('fee'))['fee__sum'])
+        total_fees_ppm = 0 if total_sent == 0 else int(total_fees/(total_sent/1000000))
+        onchain_costs = 0 if onchain_txs.count() == 0 else onchain_txs.aggregate(Sum('fee'))['fee__sum']
+        close_fees = closures.aggregate(Sum('closing_costs'))['closing_costs__sum'] if closures.exists() else 0
+        onchain_costs += close_fees
+        profits = int(total_revenue-total_fees-onchain_costs)
+        target = {
+            'forward_count': forward_count,
+            'forward_amount': forward_amount,
+            'total_revenue': total_revenue,
+            'total_revenue_ppm': total_revenue_ppm,
+            'total_fees': total_fees,
+            'total_fees_ppm': total_fees_ppm,
+            'onchain_costs': onchain_costs,
+            'profits': profits,
+            'profits_ppm': 0 if forward_amount == 0  else int(profits/(forward_amount/1000000)),
+            'percent_cost': 0 if total_revenue == 0 else int(((total_fees+onchain_costs)/total_revenue)*100),
+        }
+        return Response({'message': 'success', 'data':target})
+    except Exception as e:
+        error = str(e)
+        details_index = error.find('details =') + 11
+        debug_error_index = error.find('debug_error_string =') - 3
+        error_msg = error[details_index:debug_error_index]
+        return Response({'error': 'Failed to get revenue stats! Error: ' + error_msg})
+
+@api_view(['GET'])
 def pending_channels(request):
     try:
-        stub = lnrpc.LightningStub(lnd_connect(settings.LND_DIR_PATH, settings.LND_NETWORK, settings.LND_RPC_SERVER))
+        stub = lnrpc.LightningStub(lnd_connect())
         response = stub.PendingChannels(ln.PendingChannelsRequest())
         if response.pending_open_channels or response.pending_closing_channels or response.pending_force_closing_channels or response.waiting_close_channels or response.total_limbo_balance:
             target = {}
