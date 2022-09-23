@@ -425,9 +425,8 @@ def update_closures(stub):
                         if resolution.resolution_type != 2:
                             closing_costs += get_tx_fees(resolution.sweep_txid)
                         Resolutions(chan_id=closure.chan_id, resolution_type=resolution.resolution_type, outcome=resolution.outcome, outpoint_tx=resolution.outpoint.txid_str, outpoint_index=resolution.outpoint.output_index, amount_sat=resolution.amount_sat, sweep_txid=resolution.sweep_txid).save()
-                if channel:
-                    channel.closing_costs = closing_costs
-                    channel.save()
+                db_closure.closing_costs = closing_costs
+                db_closure.save()
 
 def reconnect_peers(stub):
     #Allow 1 hour before attempting reconnect attempts. Most issues should resolve in this time anyway.
@@ -456,11 +455,17 @@ def reconnect_peers(stub):
                     except Exception as e:
                         print (f"{datetime.now().strftime('%c')} : ... Unable to find node info on graph, using last known value {peer.alias=} {peer.pubkey=} {peer.address=} {str(e)=}")
                         host = peer.address
-                    address = ln.LightningAddress(pubkey=inactive_peer, host=host)
+                    #address = ln.LightningAddress(pubkey=inactive_peer, host=host)
                     print (f"{datetime.now().strftime('%c')} : ... Attempting connection to {peer.alias=} {inactive_peer=} {host=}")
                     try:
-                        response = stub.ConnectPeer(request = ln.ConnectPeerRequest(addr=address, perm=False, timeout=30))
+                        #try both the graph value and last know value
+                        response = stub.ConnectPeer(request = ln.ConnectPeerRequest(addr=ln.LightningAddress(pubkey=inactive_peer, host=host), perm=False, timeout=30))
                         print (f"{datetime.now().strftime('%c')} : .... Status {peer.alias=} {inactive_peer=} {response=}")
+
+                        if host != peer.address and peer.address[:9] != '127.0.0.1':
+                            response = stub.ConnectPeer(request = ln.ConnectPeerRequest(addr=ln.LightningAddress(pubkey=inactive_peer, host=peer.address), perm=False, timeout=30))
+                        #response = stub.ConnectPeer(request = ln.ConnectPeerRequest(addr=address, perm=False, timeout=5))
+                            print (f"{datetime.now().strftime('%c')} : .... Status {peer.alias=} {inactive_peer=} {response=}")
                     except Exception as e:
                         print (f"{datetime.now().strftime('%c')} : .... Error reconnecting {peer.alias} {inactive_peer=} {str(e)=}")
                     peer.last_reconnected = datetime.now()
