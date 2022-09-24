@@ -110,7 +110,7 @@
       <th>Status</th>
       <th>Hash</th>
     </tr>
-    {% for rebalance in rebalances %}
+    {% for rebalance in rebalancer %}
     <tr>
       <td title="{{ rebalance.requested }}">{{ rebalance.requested|naturaltime }}</td>
       <td {% if rebalance.status == 0 %}>---{% else %}title="{{ rebalance.start }}">{{ rebalance.start|naturaltime }}{% endif %}</td>
