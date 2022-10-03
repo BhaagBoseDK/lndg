@@ -6,9 +6,10 @@ from django.contrib.auth.decorators import login_required
 from datetime import datetime, timedelta
 from rest_framework import viewsets
 from rest_framework.response import Response
-from rest_framework.decorators import api_view
-from .forms import OpenChannelForm, CloseChannelForm, ConnectPeerForm, AddInvoiceForm, RebalancerForm, ChanPolicyForm, UpdateChannel, UpdateSetting, AutoRebalanceForm, AddTowerForm, RemoveTowerForm, DeleteTowerForm, BatchOpenForm, UpdatePending, UpdateClosing
-from .models import Payments, PaymentHops, Invoices, Forwards, Channels, Rebalancer, LocalSettings, Peers, Onchain, Closures, Resolutions, PendingHTLCs, FailedHTLCs, Autopilot, Autofees, PendingChannels
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from .forms import OpenChannelForm, CloseChannelForm, ConnectPeerForm, AddInvoiceForm, RebalancerForm, ChanPolicyForm, UpdateChannel, UpdateSetting, AutoRebalanceForm, AddTowerForm, RemoveTowerForm, DeleteTowerForm, BatchOpenForm, UpdatePending, UpdateClosing, UpdateKeysend, AddAvoid, RemoveAvoid
+from .models import Payments, PaymentHops, Invoices, Forwards, Channels, Rebalancer, LocalSettings, Peers, Onchain, Closures, Resolutions, PendingHTLCs, FailedHTLCs, Autopilot, Autofees, PendingChannels, AvoidNodes
 from .serializers import ConnectPeerSerializer, FailedHTLCSerializer, LocalSettingsSerializer, OpenChannelSerializer, CloseChannelSerializer, AddInvoiceSerializer, PaymentHopsSerializer, PaymentSerializer, InvoiceSerializer, ForwardSerializer, ChannelSerializer, PendingHTLCSerializer, RebalancerSerializer, UpdateAliasSerializer, PeerSerializer, OnchainSerializer, ClosuresSerializer, ResolutionsSerializer
 from gui.lnd_deps import lightning_pb2 as ln
 from gui.lnd_deps import lightning_pb2_grpc as lnrpc
@@ -44,7 +45,18 @@ def get_tx_fees(txid):
     fee = request_data['fee']
     return fee
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+class is_login_required(object):
+    def __init__(self, dec, condition):
+        self.decorator = dec
+        self.condition = condition
+
+    def __call__(self, func):
+        if not self.condition:
+            # No login required
+            return func
+        return self.decorator(func)
+
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def home(request):
     if request.method == 'GET':
         try:
@@ -305,7 +317,7 @@ def home(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def channels(request):
     if request.method == 'GET':
         filter_7day = datetime.now() - timedelta(days=7)
@@ -400,7 +412,7 @@ def channels(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def fees(request):
     if request.method == 'GET':
         filter_1day = datetime.now() - timedelta(days=1)
@@ -433,6 +445,11 @@ def fees(request):
             else:
                 LocalSettings(key='AF-FailedHTLCs', value='25').save()
                 failed_htlc_limit = 25
+            if LocalSettings.objects.filter(key='AF-UpdateHours').exists():
+                update_hours = int(LocalSettings.objects.filter(key='AF-UpdateHours')[0].value)
+            else:
+                LocalSettings(key='AF-UpdateHours', value='24').save()
+                update_hours = 24
             failed_htlc_df = DataFrame.from_records(FailedHTLCs.objects.filter(timestamp__gte=filter_1day).order_by('-id').values())
             if failed_htlc_df.shape[0] > 0:
                 failed_htlc_df = failed_htlc_df[(failed_htlc_df['wire_failure']==15) & (failed_htlc_df['failure_detail']==6) & (failed_htlc_df['amount']>failed_htlc_df['chan_out_liq']+failed_htlc_df['chan_out_pending'])]
@@ -481,7 +498,7 @@ def fees(request):
             channels_df['new_rate'] = channels_df.apply(lambda row: max_rate if max_rate < row['new_rate'] else row['new_rate'], axis=1)
             channels_df['new_rate'] = channels_df.apply(lambda row: min_rate if min_rate > row['new_rate'] else row['new_rate'], axis=1)
             channels_df['adjustment'] = channels_df.apply(lambda row: int(row['new_rate']-row['local_fee_rate']), axis=1)
-            channels_df['eligible'] = channels_df.apply(lambda row: (datetime.now()-row['fees_updated']).total_seconds() > 86400, axis=1)
+            channels_df['eligible'] = channels_df.apply(lambda row: (datetime.now()-row['fees_updated']).total_seconds() > (update_hours*3600), axis=1)
         context = {
             'channels': [] if channels_df.empty else channels_df.sort_values(by=['out_percent']).to_dict(orient='records'),
             'local_settings': LocalSettings.objects.filter(key__contains='AF-').order_by('key'),
@@ -493,7 +510,7 @@ def fees(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def advanced(request):
     if request.method == 'GET':
         channels = Channels.objects.filter(is_open=True).annotate(outbound_percent=((Sum('local_balance')+Sum('pending_outbound'))*1000)/Sum('capacity')).annotate(inbound_percent=((Sum('remote_balance')+Sum('pending_inbound'))*1000)/Sum('capacity')).order_by('-is_active', 'outbound_percent')
@@ -504,6 +521,8 @@ def advanced(request):
             channels_df['local_balance'] = channels_df.apply(lambda row: row.local_balance + row.pending_outbound, axis=1)
             channels_df['remote_balance'] = channels_df.apply(lambda row: row.remote_balance + row.pending_inbound, axis=1)
             channels_df['fee_ratio'] = channels_df.apply(lambda row: 100 if row['local_fee_rate'] == 0 else int(round(((row['remote_fee_rate']/row['local_fee_rate'])*1000)/10, 0)), axis=1)
+            channels_df['local_min_htlc'] = channels_df['local_min_htlc_msat']/1000
+            channels_df['local_max_htlc'] = channels_df['local_max_htlc_msat']/1000
         context = {
             'channels': channels_df.to_dict(orient='records'),
             'local_settings': LocalSettings.objects.all().order_by('key'),
@@ -515,7 +534,7 @@ def advanced(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def route(request):
     if request.method == 'GET':
         try:
@@ -542,7 +561,7 @@ def route(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def routes(request):
     if request.method == 'GET':
         try:
@@ -558,7 +577,7 @@ def routes(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def peers(request):
     if request.method == 'GET':
         peers = Peers.objects.all().order_by('-connected', 'inbound', '-last_reconnected')
@@ -572,7 +591,7 @@ def peers(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def balances(request):
     if request.method == 'GET':
         stub = lnrpc.LightningStub(lnd_connect())
@@ -586,7 +605,7 @@ def balances(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def closures(request):
     if request.method == 'GET':
         try:
@@ -645,7 +664,7 @@ def find_next_block_maturity(force_closing_channel):
             return pending_htlc.blocks_til_maturity
     return -1
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def towers(request):
     if request.method == 'GET':
         try:
@@ -677,7 +696,7 @@ def towers(request):
     else:
         return redirect(request.META.get('HTTP_REFERER'))
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def add_tower_form(request):
     if request.method == 'POST':
         form = AddTowerForm(request.POST)
@@ -701,7 +720,7 @@ def add_tower_form(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def delete_tower_form(request):
     if request.method == 'POST':
         form = DeleteTowerForm(request.POST)
@@ -722,7 +741,7 @@ def delete_tower_form(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def remove_tower_form(request):
     if request.method == 'POST':
         form = RemoveTowerForm(request.POST)
@@ -742,7 +761,7 @@ def remove_tower_form(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def resolutions(request):
     if request.method == 'GET':
         chan_id = request.GET.urlencode()[1:]
@@ -756,7 +775,7 @@ def resolutions(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def income(request):
     if request.method == 'GET':
         stub = lnrpc.LightningStub(lnd_connect())
@@ -765,6 +784,11 @@ def income(request):
         filter_7day = datetime.now() - timedelta(days=7)
         filter_1day = datetime.now() - timedelta(days=1)
         node_info = stub.GetInfo(ln.GetInfoRequest())
+        invoices = Invoices.objects.filter(state=1, is_revenue=True)
+        invoices_90day = invoices.filter(settle_date__gte=filter_90day)
+        invoices_30day = invoices.filter(settle_date__gte=filter_30day)
+        invoices_7day = invoices.filter(settle_date__gte=filter_7day)
+        invoices_1day = invoices.filter(settle_date__gte=filter_1day)
         payments = Payments.objects.filter(status=2)
         payments_90day = payments.filter(creation_date__gte=filter_90day)
         payments_30day = payments.filter(creation_date__gte=filter_30day)
@@ -800,6 +824,16 @@ def income(request):
         total_revenue_30day = 0 if forward_count_30day == 0 else int(forwards_30day.aggregate(Sum('fee'))['fee__sum'])
         total_revenue_7day = 0 if forward_count_7day == 0 else int(forwards_7day.aggregate(Sum('fee'))['fee__sum'])
         total_revenue_1day = 0 if forward_count_1day == 0 else int(forwards_1day.aggregate(Sum('fee'))['fee__sum'])
+        total_received = 0 if invoices.count() == 0 else int(invoices.aggregate(Sum('amt_paid'))['amt_paid__sum'])
+        total_received_90day = 0 if invoices_90day.count() == 0 else int(invoices_90day.aggregate(Sum('amt_paid'))['amt_paid__sum'])
+        total_received_30day = 0 if invoices_30day.count() == 0 else int(invoices_30day.aggregate(Sum('amt_paid'))['amt_paid__sum'])
+        total_received_7day = 0 if invoices_7day.count() == 0 else int(invoices_7day.aggregate(Sum('amt_paid'))['amt_paid__sum'])
+        total_received_1day = 0 if invoices_1day.count() == 0 else int(invoices_1day.aggregate(Sum('amt_paid'))['amt_paid__sum'])
+        total_revenue += total_received
+        total_revenue_90day += total_received_90day
+        total_revenue_30day += total_received_30day
+        total_revenue_7day += total_received_7day
+        total_revenue_1day += total_received_1day
         total_revenue_ppm = 0 if forward_amount == 0 else int(total_revenue/(forward_amount/1000000))
         total_revenue_ppm_90day = 0 if forward_amount_90day == 0 else int(total_revenue_90day/(forward_amount_90day/1000000))
         total_revenue_ppm_30day = 0 if forward_amount_30day == 0 else int(total_revenue_30day/(forward_amount_30day/1000000))
@@ -899,7 +933,7 @@ def income(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def channel(request):
     if request.method == 'GET':
         chan_id = request.GET.urlencode()[1:]
@@ -1292,17 +1326,21 @@ def channel(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def opens(request):
     if request.method == 'GET':
         stub = lnrpc.LightningStub(lnd_connect())
         self_pubkey = stub.GetInfo(ln.GetInfoRequest()).identity_pubkey
         current_peers = Channels.objects.filter(is_open=True).values_list('remote_pubkey')
+        exlcude_list = AvoidNodes.objects.values_list('pubkey')
         filter_60day = datetime.now() - timedelta(days=60)
         payments_60day = Payments.objects.filter(creation_date__gte=filter_60day).values_list('payment_hash')
-        open_list = PaymentHops.objects.filter(payment_hash__in=payments_60day).exclude(node_pubkey=self_pubkey).exclude(node_pubkey__in=current_peers).values('node_pubkey', 'alias').annotate(ppm=(Sum('fee')/Sum('amt'))*1000000).annotate(score=Round((Round(Count('id')/5, output_field=IntegerField())+Round(Sum('amt')/500000, output_field=IntegerField()))/10, output_field=IntegerField())).annotate(count=Count('id')).annotate(amount=Sum('amt')).annotate(fees=Sum('fee')).annotate(sum_cost_to=Sum('cost_to')/(Sum('amt')/1000000)).exclude(score=0).order_by('-score', 'ppm')[:21]
+        open_list = PaymentHops.objects.filter(payment_hash__in=payments_60day).exclude(node_pubkey=self_pubkey).exclude(node_pubkey__in=current_peers).exclude(node_pubkey__in=exlcude_list).values('node_pubkey').annotate(ppm=(Sum('fee')/Sum('amt'))*1000000).annotate(score=Round((Round(Count('id')/5, output_field=IntegerField())+Round(Sum('amt')/500000, output_field=IntegerField()))/10, output_field=IntegerField())).annotate(count=Count('id')).annotate(amount=Sum('amt')).annotate(fees=Sum('fee')).annotate(sum_cost_to=Sum('cost_to')/(Sum('amt')/1000000)).exclude(score=0).order_by('-score', 'ppm')[:21]
+        for open in open_list:
+            open['alias'] = PaymentHops.objects.filter(node_pubkey=open['node_pubkey']).order_by('-id')[0].alias
         context = {
             'open_list': open_list,
+            'avoid_list': AvoidNodes.objects.all(),
             'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links()
         }
@@ -1310,7 +1348,7 @@ def opens(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def actions(request):
     if request.method == 'GET':
         channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(outbound_percent=((Sum('local_balance')+Sum('pending_outbound'))*1000)/Sum('capacity')).annotate(inbound_percent=((Sum('remote_balance')+Sum('pending_inbound'))*1000)/Sum('capacity'))
@@ -1371,7 +1409,7 @@ def actions(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def pending_htlcs(request):
     if request.method == 'GET':
         stub = lnrpc.LightningStub(lnd_connect())
@@ -1384,7 +1422,7 @@ def pending_htlcs(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def failed_htlcs(request):
     if request.method == 'GET':
         try:
@@ -1408,7 +1446,7 @@ def failed_htlcs(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def payments(request):
     if request.method == 'GET':
         context = {
@@ -1418,7 +1456,7 @@ def payments(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def invoices(request):
     if request.method == 'GET':
         context = {
@@ -1429,7 +1467,7 @@ def invoices(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def rebalances(request):
     if request.method == 'GET':
         context = {
@@ -1446,7 +1484,7 @@ def rebalances(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def batch(request):
     if request.method == 'GET':
         context = {
@@ -1469,7 +1507,7 @@ def open_peer(peer_pubkey, stub):
         except:
             return False
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def batch_open(request):
     if request.method == 'POST':
         form = BatchOpenForm(request.POST)
@@ -1593,7 +1631,7 @@ def batch_open(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect('batch')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def forwards(request):
     if request.method == 'GET':
         context = {
@@ -1603,7 +1641,7 @@ def forwards(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def rebalancing(request):
     if request.method == 'GET':
         filter_7day = datetime.now() - timedelta(days=7)
@@ -1645,7 +1683,7 @@ def rebalancing(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def keysends(request):
     if request.method == 'GET':
         r_hash = request.GET.urlencode()[1:]
@@ -1657,7 +1695,7 @@ def keysends(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def autopilot(request):
     if request.method == 'GET':
         chan_id = request.GET.urlencode()[1:]
@@ -1670,7 +1708,7 @@ def autopilot(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def autofees(request):
     if request.method == 'GET':
         chan_id = request.GET.urlencode()[1:]
@@ -1691,7 +1729,7 @@ def autofees(request):
     else:
         return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def open_channel_form(request):
     if request.method == 'POST':
         form = OpenChannelForm(request.POST)
@@ -1729,7 +1767,7 @@ def open_channel_form(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def close_channel_form(request):
     if request.method == 'POST':
         form = CloseChannelForm(request.POST)
@@ -1766,7 +1804,7 @@ def close_channel_form(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def connect_peer_form(request):
     if request.method == 'POST':
         form = ConnectPeerForm(request.POST)
@@ -1795,7 +1833,7 @@ def connect_peer_form(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def new_address_form(request):
     if request.method == 'POST':
         try:
@@ -1810,7 +1848,7 @@ def new_address_form(request):
             messages.error(request, 'Address request failed! Error: ' + error_msg)
     return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def add_invoice_form(request):
     if request.method == 'POST':
         form = AddInvoiceForm(request.POST)
@@ -1829,7 +1867,7 @@ def add_invoice_form(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def rebalance(request):
     if request.method == 'POST':
         form = RebalancerForm(request.POST)
@@ -1858,7 +1896,7 @@ def rebalance(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def update_chan_policy(request):
     if request.method == 'POST':
         form = ChanPolicyForm(request.POST)
@@ -1911,7 +1949,7 @@ def update_chan_policy(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect('home')
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def auto_rebalance(request):
     if request.method == 'POST':
         form = AutoRebalanceForm(request.POST)
@@ -2056,7 +2094,7 @@ def auto_rebalance(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def update_channel(request):
     if request.method == 'POST':
         form = UpdateChannel(request.POST)
@@ -2131,14 +2169,34 @@ def update_channel(request):
                 stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=db_channel.local_base_fee, fee_rate=(db_channel.local_fee_rate/1000000), time_lock_delta=target))
                 db_channel.local_cltv = target
                 db_channel.save()
-                messages.success(request, 'CLTV for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(target))
+                messages.success(request, 'CLTV for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(float(target)))
+            elif update_target == 10:
+                stub = lnrpc.LightningStub(lnd_connect())
+                channel_point = ln.ChannelPoint()
+                channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
+                channel_point.funding_txid_str = db_channel.funding_txid
+                channel_point.output_index = db_channel.output_index
+                stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=db_channel.local_base_fee, fee_rate=(db_channel.local_fee_rate/1000000), time_lock_delta=db_channel.local_cltv, min_htlc_msat_specified=True, min_htlc_msat=int(target*1000)))
+                db_channel.local_min_htlc_msat = int(target*1000)
+                db_channel.save()
+                messages.success(request, 'Min HTLC for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(float(target)))
+            elif update_target == 11:
+                stub = lnrpc.LightningStub(lnd_connect())
+                channel_point = ln.ChannelPoint()
+                channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
+                channel_point.funding_txid_str = db_channel.funding_txid
+                channel_point.output_index = db_channel.output_index
+                stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=db_channel.local_base_fee, fee_rate=(db_channel.local_fee_rate/1000000), time_lock_delta=db_channel.local_cltv, max_htlc_msat=int(target*1000)))
+                db_channel.local_max_htlc_msat = int(target*1000)
+                db_channel.save()
+                messages.success(request, 'Max HTLC for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(target))
             else:
                 messages.error(request, 'Invalid target code. Please try again.')
         else:
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def update_pending(request):
     if request.method == 'POST':
         form = UpdatePending(request.POST)
@@ -2194,7 +2252,7 @@ def update_pending(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def update_setting(request):
     if request.method == 'POST':
         form = UpdateSetting(request.POST)
@@ -2393,6 +2451,20 @@ def update_setting(request):
                     db_channel.local_cltv = target
                     db_channel.save()
                 messages.success(request, 'CLTV for all channels updated to a value of: ' + str(target))
+            elif key == 'ALL-minHTLC':
+                target = int(float(value)*1000)
+                stub = lnrpc.LightningStub(lnd_connect())
+                channels = Channels.objects.filter(is_open=True)
+                for db_channel in channels:
+                    stub = lnrpc.LightningStub(lnd_connect())
+                    channel_point = ln.ChannelPoint()
+                    channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
+                    channel_point.funding_txid_str = db_channel.funding_txid
+                    channel_point.output_index = db_channel.output_index
+                    stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=db_channel.local_base_fee, fee_rate=(db_channel.local_fee_rate/1000000), time_lock_delta=db_channel.local_cltv, min_htlc_msat_specified=True, min_htlc_msat=target))
+                    db_channel.local_min_htlc_msat = target
+                    db_channel.save()
+                messages.success(request, 'Min HTLC for all channels updated to a value of: ' + str(float(value)))
             elif key == 'ALL-Amts':
                 target = int(value)
                 channels = Channels.objects.filter(is_open=True).update(ar_amt_target=target)
@@ -2483,7 +2555,7 @@ def update_setting(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def update_closing(request):
     if request.method == 'POST':
         form = UpdateClosing(request.POST)
@@ -2499,7 +2571,46 @@ def update_closing(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
-@login_required(login_url='/lndg-admin/login/?next=/')
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
+def update_keysend(request):
+    if request.method == 'POST':
+        form = UpdateKeysend(request.POST)
+        if form.is_valid() and Invoices.objects.filter(r_hash=form.cleaned_data['r_hash']).exists():
+            r_hash = form.cleaned_data['r_hash']
+            db_invoice = Invoices.objects.filter(r_hash=r_hash)[0]
+            db_invoice.is_revenue = not db_invoice.is_revenue
+            db_invoice.save()
+            messages.success(request, ('Marked' if db_invoice.is_revenue else 'Unmarked') + ' invoice ' + str(r_hash) + ' as revenue.')
+        else:
+            messages.error(request, 'Invalid Request. Please try again.')
+    return redirect(request.META.get('HTTP_REFERER'))
+
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
+def add_avoid(request):
+    if request.method == 'POST':
+        form = AddAvoid(request.POST)
+        if form.is_valid():
+            pubkey = form.cleaned_data['pubkey']
+            notes = form.cleaned_data['notes']
+            AvoidNodes(pubkey=pubkey, notes=notes).save()
+            messages.success(request, 'Successfully added node ' + str(pubkey) + ' to the avoid list.')
+        else:
+            messages.error(request, 'Invalid Request. Please try again.')
+    return redirect(request.META.get('HTTP_REFERER'))
+
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
+def remove_avoid(request):
+    if request.method == 'POST':
+        form = RemoveAvoid(request.POST)
+        if form.is_valid() and AvoidNodes.objects.filter(pubkey=form.cleaned_data['pubkey']).exists():
+            pubkey = form.cleaned_data['pubkey']
+            AvoidNodes.objects.filter(pubkey=pubkey).delete()
+            messages.success(request, 'Successfully removed node ' + str(pubkey) + ' from the avoid list.')
+        else:
+            messages.error(request, 'Invalid Request. Please try again.')
+    return redirect(request.META.get('HTTP_REFERER'))
+
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def get_fees(request):
     if request.method == 'GET':
         missing_fees = Closures.objects.exclude(close_type__in=[4, 5]).exclude(open_initiator=2, resolution_count=0).filter(closing_costs=0)
@@ -2518,46 +2629,57 @@ def get_fees(request):
     return redirect(request.META.get('HTTP_REFERER'))
 
 class PaymentsViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Payments.objects.all()
     serializer_class = PaymentSerializer
 
 class PaymentHopsViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = PaymentHops.objects.all()
     serializer_class = PaymentHopsSerializer
 
 class InvoicesViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Invoices.objects.all()
     serializer_class = InvoiceSerializer
 
 class ForwardsViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Forwards.objects.all()
     serializer_class = ForwardSerializer
 
 class PeersViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Peers.objects.all()
     serializer_class = PeerSerializer
 
 class OnchainViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Onchain.objects.all()
     serializer_class = OnchainSerializer
 
 class ClosuresViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Closures.objects.all()
     serializer_class = ClosuresSerializer
 
 class ResolutionsViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Resolutions.objects.all()
     serializer_class = ResolutionsSerializer
 
 class PendingHTLCViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = PendingHTLCs.objects.all()
     serializer_class = PendingHTLCSerializer
 
 class FailedHTLCViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = FailedHTLCs.objects.all()
     serializer_class = FailedHTLCSerializer
 
 class LocalSettingsViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = LocalSettings.objects.all()
     serializer_class = LocalSettingsSerializer
 
@@ -2571,6 +2693,7 @@ class LocalSettingsViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(serializer.errors)
 
 class ChannelsViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Channels.objects.all()
     serializer_class = ChannelSerializer
 
@@ -2584,6 +2707,7 @@ class ChannelsViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(serializer.errors)
 
 class RebalancerViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Rebalancer.objects.all()
     serializer_class = RebalancerSerializer
 
@@ -2596,6 +2720,7 @@ class RebalancerViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(serializer.errors)
 
 @api_view(['POST'])
+@is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
 def connect_peer(request):
     serializer = ConnectPeerSerializer(data=request.data)
     if serializer.is_valid():
@@ -2623,6 +2748,7 @@ def connect_peer(request):
         return Response({'error': 'Invalid request!'})
 
 @api_view(['POST'])
+@is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
 def open_channel(request):
     serializer = OpenChannelSerializer(data=request.data)
     if serializer.is_valid():
@@ -2658,6 +2784,7 @@ def open_channel(request):
         return Response({'error': 'Invalid request!'})
 
 @api_view(['POST'])
+@is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
 def close_channel(request):
     serializer = CloseChannelSerializer(data=request.data)
     if serializer.is_valid():
@@ -2691,6 +2818,7 @@ def close_channel(request):
         return Response({'error': 'Invalid request!'})
 
 @api_view(['POST'])
+@is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
 def add_invoice(request):
     serializer = AddInvoiceSerializer(data=request.data)
     if serializer.is_valid() and serializer.validated_data['value'] >= 0:
@@ -2708,6 +2836,7 @@ def add_invoice(request):
         return Response({'error': 'Invalid request!'})
 
 @api_view(['GET'])
+@is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
 def new_address(request):
     try:
         stub = lnrpc.LightningStub(lnd_connect())
@@ -2721,6 +2850,7 @@ def new_address(request):
         return Response({'error': 'Address creation failed! Error: ' + error_msg})
 
 @api_view(['POST'])
+@is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
 def update_alias(request):
     serializer = UpdateAliasSerializer(data=request.data)
     if serializer.is_valid():
@@ -2747,6 +2877,7 @@ def update_alias(request):
     return redirect('home')
 
 @api_view(['GET'])
+@is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
 def get_info(request):
     try:
         stub = lnrpc.LightningStub(lnd_connect())
@@ -2761,6 +2892,7 @@ def get_info(request):
         return Response({'error': 'Failed to call getinfo! Error: ' + error_msg})
 
 @api_view(['GET'])
+@is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
 def api_balances(request):
     try:
         stub = lnrpc.LightningStub(lnd_connect())
@@ -2784,6 +2916,7 @@ def api_balances(request):
         return Response({'error': 'Failed to get wallet balances! Error: ' + error_msg})
 
 @api_view(['GET'])
+@is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
 def api_income(request):
     try:
         stub = lnrpc.LightningStub(lnd_connect())
@@ -2800,6 +2933,9 @@ def api_income(request):
         forward_count = forwards.count()
         forward_amount = 0 if forward_count == 0 else int(forwards.aggregate(Sum('amt_out_msat'))['amt_out_msat__sum']/1000)
         total_revenue = 0 if forward_count == 0 else int(forwards.aggregate(Sum('fee'))['fee__sum'])
+        invoices = Invoices.objects.filter(state=1, is_revenue=True).filter(settle_date__gte=day_filter) if day_filter else Invoices.objects.filter(state=1, is_revenue=True)
+        total_received = 0 if invoices.count() == 0 else int(invoices.aggregate(Sum('amt_paid'))['amt_paid__sum'])
+        total_revenue += total_received
         total_revenue_ppm = 0 if forward_amount == 0 else int(total_revenue/(forward_amount/1000000))
         total_sent = 0 if payments.count() == 0 else int(payments.aggregate(Sum('value'))['value__sum'])
         total_fees = 0 if payments.count() == 0 else int(payments.aggregate(Sum('fee'))['fee__sum'])
@@ -2829,6 +2965,7 @@ def api_income(request):
         return Response({'error': 'Failed to get revenue stats! Error: ' + error_msg})
 
 @api_view(['GET'])
+@is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
 def pending_channels(request):
     try:
         stub = lnrpc.LightningStub(lnd_connect())

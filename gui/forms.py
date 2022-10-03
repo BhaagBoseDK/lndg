@@ -99,6 +99,8 @@ updates_channel_codes = [
     (7, 'channel_state'),
     (8, 'auto_fees'),
     (9, 'cltv'),
+    (10, 'min_htlc'),
+    (11, 'max_htlc'),
 ]
 
 class UpdateChannel(forms.Form):
@@ -110,6 +112,16 @@ class UpdateClosing(forms.Form):
     funding_txid = forms.CharField(label='funding_txid', max_length=64)
     funding_index = forms.IntegerField(label='funding_index')
     target = forms.IntegerField(label='target')
+
+class UpdateKeysend(forms.Form):
+    r_hash = forms.CharField(label='r_hash', max_length=64)
+
+class AddAvoid(forms.Form):
+    pubkey = forms.CharField(label='avoid_pubkey', max_length=66)
+    notes = forms.CharField(label='avoid_notes', max_length=1000, required=False)
+
+class RemoveAvoid(forms.Form):
+    pubkey = forms.CharField(label='avoid_pubkey', max_length=66)
 
 class UpdatePending(forms.Form):
     funding_txid = forms.CharField(label='funding_txid', max_length=64)

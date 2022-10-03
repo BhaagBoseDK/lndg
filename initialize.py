@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.conf import settings
 BASE_DIR = Path(__file__).resolve().parent
 
-def write_settings(node_ip, lnd_tls_path, lnd_macaroon_path, lnd_database_path, lnd_network, lnd_rpc_server, whitenoise, debug, csrftrusted):
+def write_settings(node_ip, lnd_tls_path, lnd_macaroon_path, lnd_database_path, lnd_network, lnd_rpc_server, whitenoise, debug, csrftrusted, nologinrequired):
     #Generate a unique secret to be used for your django site
     secret = secrets.token_urlsafe(64)
     if whitenoise:
@@ -19,6 +19,14 @@ CSRF_TRUSTED_ORIGINS = [%s]
     """ % (csrftrusted)
     else:
         csrf = ''
+    if not nologinrequired:
+        api_login = """
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],"""
+    else:
+        print('WARNING: No password login option detected, LNDg will not require authentication...')
+        api_login = ''
     settings_file = '''"""
 Django settings for lndg project.
 
@@ -53,6 +61,7 @@ LND_MACAROON_PATH = '%s'
 LND_DATABASE_PATH = '%s'
 LND_NETWORK = '%s'
 LND_RPC_SERVER = '%s'
+LOGIN_REQUIRED = %s
 
 # Application definition
 
@@ -131,10 +140,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.LimitOffsetPagination',
-    'PAGE_SIZE': 100,
-    'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.IsAuthenticated',
-    ],
+    'PAGE_SIZE': 100,%s
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.BasicAuthentication',
         'rest_framework.authentication.SessionAuthentication',
@@ -159,12 +165,12 @@ USE_TZ = False
 STATIC_URL = 'static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'gui/static/')
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-''' % (secret, debug, node_ip, csrf, lnd_tls_path, lnd_macaroon_path, lnd_database_path, lnd_network, lnd_rpc_server, wnl)
+''' % (secret, debug, node_ip, csrf, lnd_tls_path, lnd_macaroon_path, lnd_database_path, lnd_network, lnd_rpc_server, not nologinrequired, wnl, api_login)
     try:
         f = open("lndg/settings.py", "x")
         f.close()
     except:
-        print('A settings file may already exist, please double check.')
+        print('A settings file may already exist, skipping creation...')
         return
     try:
         f = open("lndg/settings.py", "w")
@@ -234,7 +240,7 @@ stdout_logfile_backups = 15
         f = open("/usr/local/etc/supervisord.conf", "x")
         f.close()
     except:
-        print('A supervisord settings file may already exist, please double check.')
+        print('A supervisord settings file may already exist, skipping creation...')
         return
     try:
         f = open("/usr/local/etc/supervisord.conf", "w")
@@ -261,6 +267,7 @@ def main():
     parser.add_argument('-tls', '--tlscert', help = 'Set the path to the tls cert', default=None)
     parser.add_argument('-mcrn', '--macaroon', help = 'Set the path to the macroon file', default=None)
     parser.add_argument('-lnddb', '--lnddatabase', help = 'Set the path to the channel.db for monitoring', default=None)
+    parser.add_argument('-nologin', '--nologinrequired', help = 'By default, force all connections to be authenticated', action='store_true')
     args = parser.parse_args()
     if args.lnddir and (args.tlscert or args.macaroon or args.lnddatabase):
         parser.error("You may not use tlscert or macaroon flags with the lnddir flag")
@@ -277,13 +284,14 @@ def main():
     adminuser = args.adminuser
     adminpw = args.adminpw
     csrftrusted = args.csrftrusted
+    nologinrequired = args.nologinrequired
     lnd_tls_path = args.tlscert if args.tlscert else lnd_dir_path + '/tls.cert'
     lnd_macaroon_path = args.macaroon if args.macaroon else lnd_dir_path + '/data/chain/bitcoin/' + lnd_network + '/admin.macaroon'
     lnd_database_path = args.lnddatabase if args.lnddatabase else lnd_dir_path + '/data/graph/' + lnd_network + '/channel.db'
     if docker:
         setup_supervisord = True
         whitenoise = True
-    write_settings(node_ip, lnd_tls_path, lnd_macaroon_path, lnd_database_path, lnd_network, lnd_rpc_server, whitenoise, debug, csrftrusted)
+    write_settings(node_ip, lnd_tls_path, lnd_macaroon_path, lnd_database_path, lnd_network, lnd_rpc_server, whitenoise, debug, csrftrusted, nologinrequired)
     if setup_supervisord:
         print('Supervisord setup requested...')
         write_supervisord_settings(sduser)

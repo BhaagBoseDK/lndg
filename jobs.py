@@ -94,7 +94,7 @@ def adjust_ar_amt( payment, chan_id ):
     last_rebalance_duration = Rebalancer.objects.filter(payment_hash=payment.payment_hash)[0].duration if Rebalancer.objects.filter(payment_hash=payment.payment_hash).exists() else 0
     #print (f"{datetime.now().strftime('%c')} : DEBUG {last_rebalance_duration=} {payment.payment_hash=}")
     if last_rebalance_duration <= 1 or payment.status not in (2,3):
-        print (f"{datetime.now().strftime('%c')} : Skipping Liquidiy Estimation {last_rebalance_duration=} {payment.payment_hash=}")
+        print (f"{datetime.now().strftime('%c')} : Skipping Liquidity Estimation {last_rebalance_duration=} {payment.payment_hash=}")
         return
     #To be coverted to settings later
     lower_limit = 69420
@@ -242,28 +242,40 @@ def update_channels(stub):
                 db_channel.local_fee_rate = chan_data.node2_policy.fee_rate_milli_msat
                 db_channel.local_disabled = chan_data.node2_policy.disabled
                 db_channel.local_cltv = chan_data.node2_policy.time_lock_delta
+                db_channel.local_min_htlc_msat = chan_data.node2_policy.min_htlc
+                db_channel.local_max_htlc_msat = chan_data.node2_policy.max_htlc_msat
                 db_channel.remote_base_fee = chan_data.node1_policy.fee_base_msat
                 db_channel.remote_fee_rate = chan_data.node1_policy.fee_rate_milli_msat
                 db_channel.remote_disabled = chan_data.node1_policy.disabled
                 db_channel.remote_cltv = chan_data.node1_policy.time_lock_delta
+                db_channel.remote_min_htlc_msat = chan_data.node1_policy.min_htlc
+                db_channel.remote_max_htlc_msat = chan_data.node1_policy.max_htlc_msat
             else:
                 db_channel.local_base_fee = chan_data.node1_policy.fee_base_msat
                 db_channel.local_fee_rate = chan_data.node1_policy.fee_rate_milli_msat
                 db_channel.local_disabled = chan_data.node1_policy.disabled
                 db_channel.local_cltv = chan_data.node1_policy.time_lock_delta
+                db_channel.local_min_htlc_msat = chan_data.node1_policy.min_htlc
+                db_channel.local_max_htlc_msat = chan_data.node1_policy.max_htlc_msat
                 db_channel.remote_base_fee = chan_data.node2_policy.fee_base_msat
                 db_channel.remote_fee_rate = chan_data.node2_policy.fee_rate_milli_msat
                 db_channel.remote_disabled = chan_data.node2_policy.disabled
                 db_channel.remote_cltv = chan_data.node2_policy.time_lock_delta
+                db_channel.remote_min_htlc_msat = chan_data.node2_policy.min_htlc
+                db_channel.remote_max_htlc_msat = chan_data.node2_policy.max_htlc_msat
         except:
             db_channel.local_base_fee = 0
             db_channel.local_fee_rate = 0
             db_channel.local_disabled = False
             db_channel.local_cltv = 40
+            db_channel.local_min_htlc_msat = 0
+            db_channel.local_max_htlc_msat = 0
             db_channel.remote_base_fee = 0
             db_channel.remote_fee_rate = 0
             db_channel.remote_disabled = False
             db_channel.remote_cltv = 40
+            db_channel.remote_min_htlc_msat = 0
+            db_channel.remote_max_htlc_msat = 0
         db_channel.local_balance = channel.local_balance
         db_channel.remote_balance = channel.remote_balance
         db_channel.unsettled_balance = channel.unsettled_balance
@@ -540,13 +552,18 @@ def auto_fees(stub):
             else:
                 LocalSettings(key='AF-FailedHTLCs', value='25').save()
                 failed_htlc_limit = 25
+            if LocalSettings.objects.filter(key='AF-UpdateHours').exists():
+                update_hours = int(LocalSettings.objects.filter(key='AF-UpdateHours')[0].value)
+            else:
+                LocalSettings(key='AF-UpdateHours', value='24').save()
+                update_hours = 24
 
             #Limit Change to 6.9% at a time.
             limit_change=0.069
             up_level = 69
             down_level = 21
 
-            channels_df['eligible'] = channels_df.apply(lambda row: (datetime.now()-row['fees_updated']).total_seconds() > 86400, axis=1)
+            channels_df['eligible'] = channels_df.apply(lambda row: (datetime.now()-row['fees_updated']).total_seconds() > (update_hours*3600), axis=1)
             channels_df = channels_df[channels_df['eligible']==True]
             if channels_df.shape[0] > 0:
                 failed_htlc_df = DataFrame.from_records(FailedHTLCs.objects.filter(timestamp__gte=filter_1day).order_by('-id').values())
