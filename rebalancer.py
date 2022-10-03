@@ -198,8 +198,9 @@ def auto_enable():
             chan_list = lookup_channels.filter(remote_pubkey=channel['remote_pubkey']).values('chan_id')
             routed_in_apday = forwards.filter(chan_id_in__in=chan_list).count()
             routed_out_apday = forwards.filter(chan_id_out__in=chan_list).count()
-            iapD = 0 if routed_in_apday == 0 else int(forwards.filter(chan_id_in__in=chan_list).aggregate(Sum('amt_in_msat'))['amt_in_msat__sum']/100000000)/10
-            oapD = 0 if routed_out_apday == 0 else int(forwards.filter(chan_id_out__in=chan_list).aggregate(Sum('amt_out_msat'))['amt_out_msat__sum']/100000000)/10
+            #Minimum 1M units for rebalance
+            iapD = 0 if routed_in_apday == 0 else int(forwards.filter(chan_id_in__in=chan_list).aggregate(Sum('amt_in_msat'))['amt_in_msat__sum']/1000000000)/1
+            oapD = 0 if routed_out_apday == 0 else int(forwards.filter(chan_id_out__in=chan_list).aggregate(Sum('amt_out_msat'))['amt_out_msat__sum']/1000000000)/1
 
             for peer_channel in lookup_channels.filter(chan_id__in=chan_list):
                 #print('Processing: ', peer_channel.alias, ' : ', peer_channel.chan_id, ' : ', oapD, " : ", iapD, ' : ', outbound_percent, ' : ', inbound_percent)
