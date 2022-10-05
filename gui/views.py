@@ -1,4 +1,4 @@
-from django.contrib import messages
+wstubfrom django.contrib import messages
 from django.shortcuts import get_object_or_404, render, redirect
 from django.db.models import Sum, IntegerField, Count, F, Q
 from django.db.models.functions import Round
@@ -1620,9 +1620,9 @@ def batch_open(request):
                         channel_open.node_pubkey = bytes.fromhex(open['pubkey'])
                         channel_open.local_funding_amount = open['amt']
                         channels.append(channel_open)
-                    response = stub.BatchOpenChannel(ln.BatchOpenChannelRequest(channels=channels, sat_per_vbyte=form.cleaned_data['fee_rate']))
+                    response = stub.BatchOpenChannel(ln.BatchOpenChannelRequest(channels=channels, sat_per_vbyte=form.cleaned_data['fee_rate'], min_confs=0, spend_unconfirmed=True))
                     print (f"{datetime.now().strftime('%c')} : {response=}")
-                    messages.success(request, 'Batch opened channels!')
+                    messages.success(request, 'Batch opened channels! ' + response.pending_channels[0].txid[::-1].hex())
                 except Exception as e:
                     error = str(e)
                     details_index = error.find('details =') + 11
