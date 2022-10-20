@@ -17,7 +17,7 @@ from gui.lnd_deps import router_pb2 as lnr
 from gui.lnd_deps import router_pb2_grpc as lnrouter
 from gui.lnd_deps import wtclient_pb2 as wtrpc
 from gui.lnd_deps import wtclient_pb2_grpc as wtstub
-from .lnd_deps.lnd_connect import lnd_connect
+from gui.lnd_deps.lnd_connect import lnd_connect
 from lndg import settings
 from os import path
 from pandas import DataFrame, merge
@@ -1292,6 +1292,7 @@ def channel(request):
                 channels_df['cv_30day'] = round((channels_df['revenue_30day']*1216.6667)/(channels_df['capacity']*outbound_ratio) + channels_df['assisted_apy_30day'], 2)
                 channels_df['cv_7day'] = round((channels_df['revenue_7day']*5214.2857)/(channels_df['capacity']*outbound_ratio) + channels_df['assisted_apy_7day'], 2)
                 channels_df['cv_1day'] = round((channels_df['revenue_1day']*36500)/(channels_df['capacity']*outbound_ratio) + channels_df['assisted_apy_1day'], 2)
+            autofees = Autofees.objects.filter(chan_id=chan_id).filter(timestamp__gte=filter_30day).order_by('-id').annotate(change=(Sum('new_value')-Sum('old_value'))*100/Sum('old_value'))
         else:
             channels_df = DataFrame()
             forwards_df = DataFrame()
@@ -1300,9 +1301,7 @@ def channel(request):
             rebalancer_df = DataFrame()
             failed_htlc_df = DataFrame()
             peer_info_df = DataFrame()
-
-        autofees = Autofees.objects.filter(chan_id=chan_id).filter(timestamp__gte=filter_30day).order_by('-id').annotate(change=(Sum('new_value')-Sum('old_value'))*100/Sum('old_value'))
-
+            autofees = []
         context = {
             'chan_id': chan_id,
             'channel': [] if channels_df.empty else channels_df.to_dict(orient='records')[0],
@@ -1842,7 +1841,12 @@ def new_address_form(request):
     if request.method == 'POST':
         try:
             stub = lnrpc.LightningStub(lnd_connect())
-            response = stub.NewAddress(ln.NewAddressRequest(type=0))
+            version = stub.GetInfo(ln.GetInfoRequest()).version
+            # Verify sufficient version to handle p2tr address creation
+            if float(version[:4]) >= 0.15:
+                response = stub.NewAddress(ln.NewAddressRequest(type=4))
+            else:
+                response = stub.NewAddress(ln.NewAddressRequest(type=0))
             messages.success(request, 'Deposit Address: ' + str(response.address))
         except Exception as e:
             error = str(e)
@@ -2861,7 +2865,12 @@ def add_invoice(request):
 def new_address(request):
     try:
         stub = lnrpc.LightningStub(lnd_connect())
-        response = stub.NewAddress(ln.NewAddressRequest(type=0))
+        version = stub.GetInfo(ln.GetInfoRequest()).version
+        # Verify sufficient version to handle p2tr address creation
+        if float(version[:4]) >= 0.15:
+            response = stub.NewAddress(ln.NewAddressRequest(type=4))
+        else:
+            response = stub.NewAddress(ln.NewAddressRequest(type=0))
         return Response({'message': 'Retrieved new deposit address!', 'data':str(response.address)})
     except Exception as e:
         error = str(e)
