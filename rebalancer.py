@@ -220,8 +220,8 @@ def auto_enable():
                     peer_channel.save()
                     Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting='Enabled', old_value=1, new_value=0).save()
                     print (f"{datetime.now().strftime('%c')} : Auto Pilot Disabled(3) {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=}")
-                elif oapD == 0 and peer_channel.auto_rebalance == True:
-                    #print('Case 3.1: Disable AR - o7D = 0')
+                elif oapD == 0 and iapD == 0 and peer_channel.auto_rebalance == True:
+                    #print('Case 3.1: Disable AR - o7D = 0 i7D = 0')
                     peer_channel.auto_rebalance = False
                     peer_channel.save()
                     Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting='Enabled', old_value=1, new_value=0).save()
