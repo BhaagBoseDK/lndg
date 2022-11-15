@@ -86,12 +86,9 @@ def run_rebalancer(rebalance):
 
         if rebalance.status ==2:
             update_channels(stub, rebalance.last_hop_pubkey, successful_out)
-
-        auto_rebalance_channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(percent_outbound=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).annotate(inbound_can=(((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity'))/Sum('ar_in_target'))
-        inbound_cans = auto_rebalance_channels.filter(remote_pubkey=rebalance.last_hop_pubkey).filter(auto_rebalance=True, inbound_can__gte=1)
-        outbound_cans = list(auto_rebalance_channels.filter(auto_rebalance=False, percent_outbound__gte=F('ar_out_target')).values_list('chan_id', flat=True))
-
-        if rebalance.status ==2:
+            auto_rebalance_channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(percent_outbound=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).annotate(inbound_can=(((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity'))/Sum('ar_in_target'))
+            inbound_cans = auto_rebalance_channels.filter(remote_pubkey=rebalance.last_hop_pubkey).filter(auto_rebalance=True, inbound_can__gte=1)
+            outbound_cans = list(auto_rebalance_channels.filter(auto_rebalance=False, percent_outbound__gte=F('ar_out_target')).exclude(remote_pubkey=rebalance.last_hop_pubkey).values_list('chan_id', flat=True))
 
             rebalance.target_alias += ' ==> (' + str(int(payment_response.fee_msat/payment_response.value_msat*1000000)) + ')'
 
@@ -99,11 +96,11 @@ def run_rebalancer(rebalance):
                 next_rebalance = Rebalancer(value=int(rebalance.value*inc), fee_limit=int(rebalance.fee_limit*inc), outgoing_chan_ids=str(outbound_cans).replace('\'', ''), last_hop_pubkey=rebalance.last_hop_pubkey, target_alias=original_alias, duration=1)
                 next_rebalance.save()
                 print (f"{datetime.now().strftime('%c')} : RapidFire up {next_rebalance.target_alias=} {next_rebalance.value=} {rebalance.value=}")
-
             else:
                 next_rebalance = None
         elif rebalance.status > 2 and rebalance.duration <= 1 and rebalance.value > 69420:
             #Previous Rapidfire with increased value failed, try with lower value up to 69420.
+            inbound_cans = auto_rebalance_channels.filter(remote_pubkey=rebalance.last_hop_pubkey).filter(auto_rebalance=True, inbound_can__gte=1)
             if len(inbound_cans) > 0 and len(outbound_cans) > 0:
                 next_rebalance = Rebalancer(value=int(rebalance.value/dec), fee_limit=int(rebalance.fee_limit/dec), outgoing_chan_ids=str(outbound_cans).replace('\'', ''), last_hop_pubkey=rebalance.last_hop_pubkey, target_alias=original_alias, duration=1)
                 next_rebalance.save()
@@ -114,7 +111,6 @@ def run_rebalancer(rebalance):
             next_rebalance = None
 
         rebalance.save()
-
         return next_rebalance
 
 def update_channels(stub, incoming_channel, outgoing_channel):
