@@ -652,7 +652,7 @@ def auto_fees(stub):
                         channel.local_fee_rate = target_channel['new_rate']
                         channel.fees_updated = datetime.now()
                         channel.save()
-                        Autofees(chan_id=channel.chan_id, peer_alias=channel.alias, setting=(f"AF [ {target_channel['net_routed_7day']}:{target_channel['in_percent']}:{target_channel['out_percent']} ]"), old_value=target_channel['local_fee_rate'], new_value=target_channel['new_rate']).save()
+                        Autofees(chan_id=channel.chan_id, peer_alias=channel.alias, setting=(f"AF [ {target_channel['net_routed_7day']}:{round(target_channel['rebal_ppm'],0)}:{target_channel['in_percent']}:{target_channel['out_percent']} ]"), old_value=target_channel['local_fee_rate'], new_value=target_channel['new_rate']).save()
 
 def main():
     #print (f"{datetime.now().strftime('%c')} : Entering Jobs")

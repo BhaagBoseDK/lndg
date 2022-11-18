@@ -142,7 +142,7 @@ def auto_schedule():
             if not LocalSettings.objects.filter(key='AR-Inbound%').exists():
                 LocalSettings(key='AR-Inbound%', value='100').save()
             outbound_cans = list(auto_rebalance_channels.filter(auto_rebalance=False, percent_outbound__gte=F('ar_out_target')).values_list('chan_id', flat=True))
-            inbound_cans = auto_rebalance_channels.filter(auto_rebalance=True, inbound_can__gte=1).order_by('-remote_balance')
+            inbound_cans = auto_rebalance_channels.filter(auto_rebalance=True, inbound_can__gte=1).order_by('-inbound_can')
             if len(inbound_cans) > 0 and len(outbound_cans) > 0:
                 if LocalSettings.objects.filter(key='AR-MaxFeeRate').exists():
                     max_fee_rate = int(LocalSettings.objects.filter(key='AR-MaxFeeRate')[0].value)
@@ -180,7 +180,7 @@ def auto_schedule():
                                 if not (last_rebalance.status == 2 or (last_rebalance.status in [3, 4, 5, 6, 7, 400, 408] and (int((datetime.now() - last_rebalance.stop).total_seconds() / 60) > wait_period)) or (last_rebalance.status == 1 and (int((datetime.now() - last_rebalance.start).total_seconds() / 60) > wait_period))):
                                     continue
                             print( datetime.now().strftime('%c'), ' : Creating Auto Rebalance Request')
-                            print('Request for:', target.alias, ' : ', target.chan_id)
+                            print('Request for:', target.alias, ' : [', round(target.inbound_can,2), '] :', target.chan_id)
                             print('Request routing through:', outbound_cans)
                             print('Target Value:', target_value, '/', target.ar_amt_target)
                             print('Target Fee:', target_fee)
