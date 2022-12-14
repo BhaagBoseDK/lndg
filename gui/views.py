@@ -2088,7 +2088,7 @@ def auto_rebalance(request):
                 db_inbound_target.value = inbound_percent
                 db_inbound_target.save()
                 if form.cleaned_data['targetallchannels']:
-                    Channels.objects.all().update(ar_out_target=int(outbound_percent))
+                    Channels.objects.all().update(ar_in_target=int(inbound_percent))
                     messages.success(request, 'Updated auto rebalancer target inbound percent setting for all channels to: ' + str(inbound_percent))
                 else:
                     messages.success(request, 'Updated auto rebalancer target inbound percent setting in local settigs to: ' + str(inbound_percent))
@@ -2347,6 +2347,16 @@ def update_setting(request):
                 db_time_target.value = target_time
                 db_time_target.save()
                 messages.success(request, 'Updated auto rebalancer target time setting to: ' + str(target_time))
+            elif key == 'AR-Workers':
+                workers = int(value)
+                try:
+                    db_workers = LocalSettings.objects.get(key='AR-Workers')
+                except:
+                    LocalSettings(key='AR-Workers', value='5').save()
+                    db_workers = LocalSettings.objects.get(key='AR-Workers')
+                db_workers.value = workers
+                db_workers.save()
+                messages.success(request, 'Updated auto rebalancer workers setting to: ' + str(workers))
             elif key == 'AR-Enabled':
                 enabled = int(value)
                 try:
