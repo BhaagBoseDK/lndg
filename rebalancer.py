@@ -28,7 +28,7 @@ async def run_rebalancer(rebalance, worker):
     auto_rebalance_channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(percent_outbound=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).annotate(inbound_can=(((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity'))/Sum('ar_in_target'))
     outbound_cans = await get_out_cans(rebalance, auto_rebalance_channels)
     if len(outbound_cans) == 0 and rebalance.manual == False:
-        print (datetime.now().strftime('%c'), 'No outbound_cans', sep=' : ')
+        print (f"{datetime.now().strftime('%c')} : No outbound_cans")
         return None
     elif str(outbound_cans).replace('\'', '') != rebalance.outgoing_chan_ids and rebalance.manual == False:
         rebalance.outgoing_chan_ids = str(outbound_cans).replace('\'', '')
@@ -77,7 +77,7 @@ async def run_rebalancer(rebalance, worker):
             elif payment_response.status == 0:
                 rebalance.status = 400
     except Exception as e:
-        print('Exception: ', str(e))
+        print (f"{datetime.now().strftime('%c')} : Exception: {str(e)=}")
         if str(e.code()) == 'StatusCode.DEADLINE_EXCEEDED':
             rebalance.status = 408
         else:
@@ -87,7 +87,7 @@ async def run_rebalancer(rebalance, worker):
     finally:
         rebalance.stop = datetime.now()
         await save_record(rebalance)
-        print(datetime.now(), worker, 'completed payment attempts for:', rebalance.payment_hash)
+        print (f"{datetime.now().strftime('%c')} : {worker=} completed payment attempts for: {rebalance.payment_hash=}")
         original_alias = rebalance.target_alias
         inc=1.21
         dec=2
@@ -117,7 +117,7 @@ async def run_rebalancer(rebalance, worker):
         else:
             next_rebalance = None
 
-        rebalance.save()
+        await save_record(rebalance)
         return next_rebalance
 
 @sync_to_async
@@ -232,7 +232,7 @@ def auto_enable():
                 #print('Processing: ', peer_channel.alias, ' : ', peer_channel.chan_id, ' : ', oapD, " : ", iapD, ' : ', outbound_percent, ' : ', inbound_percent)
                 if peer_channel.ar_out_target == 100 and peer_channel.auto_rebalance == True:
                     #Special Case for LOOP, Wos, etc. Always Auto Rebalance if enabled to keep outbound full.
-                    print (f"{datetime.now().strftime('%c')} : Pass {peer_channel.alias=} {peer_channel.chan_id=} {peer_channel.ar_out_target=} {peer_channel.auto_rebalance=}")
+                    #print (f"{datetime.now().strftime('%c')} : Pass {peer_channel.alias=} {peer_channel.chan_id=} {peer_channel.ar_out_target=} {peer_channel.auto_rebalance=}")
                     pass
                 elif oapD > (iapD*1.10) and outbound_percent > 75:
                     #print('Case 1: Pass')
@@ -274,36 +274,36 @@ def get_pending_rebals():
 shutdown_rebalancer = False
 active_rebalances = []
 async def async_queue_manager(rebalancer_queue):
-    print('Queue manager is starting...')
+    print (f"{datetime.now().strftime('%c')} : Queue manager is starting...")
     pending_rebalances, rebal_count = await get_pending_rebals()
     if rebal_count > 0:
         for rebalance in pending_rebalances:
             await rebalancer_queue.put(rebalance)
     while True:
         global active_rebalances
-        print('Queue currently has', rebalancer_queue.qsize(), 'items...')
-        print('There are currently', len(active_rebalances), 'tasks in progress...')
-        print('Queue manager is checking for more work...')
+        print (f"{datetime.now().strftime('%c')} : Queue currently has {rebalancer_queue.qsize()=} items...")
+        print (f"{datetime.now().strftime('%c')} : There are currently {len(active_rebalances)=} tasks in progress...")
+        print (f"{datetime.now().strftime('%c')} : Queue manager is checking for more work...")
         await auto_enable()
         scheduled_ids = await auto_schedule()
         if len(scheduled_ids) > 0:
-            print('Scheduling', len(scheduled_ids), 'more jobs...')
+            print (f"{datetime.now().strftime('%c')} : Scheduling {len(scheduled_ids)=} more jobs...")
             for id in scheduled_ids:
                 scheduled_rebal = await get_scheduled_rebal(id)
                 await rebalancer_queue.put(scheduled_rebal)
         elif rebalancer_queue.qsize() == 0 and len(active_rebalances) == 0:
-            print('Queue is still empty, stoping the rebalancer...')
+            print (f"{datetime.now().strftime('%c')} : Queue is still empty, stoping the rebalancer...")
             global shutdown_rebalancer
             shutdown_rebalancer = True
             return
-        await asyncio.sleep(30)
+        await asyncio.sleep(69)
 
 async def async_run_rebalancer(worker, rebalancer_queue):
     while True:
         global active_rebalances, shutdown_rebalancer
         if not rebalancer_queue.empty():
             rebalance = await rebalancer_queue.get()
-            print(datetime.now(), worker + ' is starting a new request...')
+            print (f"{datetime.now().strftime('%c')} : {worker=} is starting a new request... {rebalance.id=} {rebalance.target_alias=}")
             active_rebalance_id = None
             if rebalance != None:
                 active_rebalance_id = rebalance.id
@@ -312,18 +312,18 @@ async def async_run_rebalancer(worker, rebalancer_queue):
                 rebalance = await run_rebalancer(rebalance, worker)
             if active_rebalance_id != None:
                 active_rebalances.remove(active_rebalance_id)
-            print(datetime.now(), worker + ' completed its request...')
+            print (f"{datetime.now().strftime('%c')} : {worker=} completed its request...")
         else:
             if shutdown_rebalancer == True:
                 return
-        await asyncio.sleep(3)
+        await asyncio.sleep(69)
 
 async def start_queue(worker_count=1):
     rebalancer_queue = asyncio.Queue()
     manager = asyncio.create_task(async_queue_manager(rebalancer_queue))
     workers = [asyncio.create_task(async_run_rebalancer("Worker " + str(worker_num+1), rebalancer_queue)) for worker_num in range(worker_count)]
     await asyncio.gather(manager, *workers)
-    print('Manager and workers have stopped...')
+    print (f"{datetime.now().strftime('%c')} : Manager and workers have stopped...")
 
 def main():
     if Rebalancer.objects.filter(status=1).exists():
@@ -338,7 +338,7 @@ def main():
         LocalSettings(key='AR-Workers', value='1').save()
         worker_count = 1
     asyncio.run(start_queue(worker_count))
-    print('Rebalancer successfully shutdown...')
+    print (f"{datetime.now().strftime('%c')} : Rebalancer successfully shutdown...")
 
 if __name__ == '__main__':
     main()
