@@ -25,13 +25,17 @@ function darkMode() {
         document.cookie = "darkmode=true"; 
     }
     var element = document.body;
-    element.classList.toggle("dark-mode");  
+    element.classList.toggle("dark-mode");
+    element.classList.toggle("dark-mode-table1");
+    element.classList.toggle("dark-mode-table2");
 }
 
 function checkDarkMode() {
     let darkmode = getCookie("darkmode");
     if (darkmode == "true") {
         var element = document.body;
-        element.classList.toggle("dark-mode"); 
+        element.classList.toggle("dark-mode");
+        element.classList.toggle("dark-mode-table1");
+        element.classList.toggle("dark-mode-table2");
     }
 }

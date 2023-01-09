@@ -48,10 +48,10 @@
         <th onclick="sortTable(6, ' (', 'activeChannels')">Unsettled</th>
         <th onclick="sortTable(7, 'int', 'activeChannels')">oRate</th>
         <th onclick="sortTable(8, 'int', 'activeChannels')">oBase</th>
-        <th onclick="sortTable(9, ' M (', 'activeChannels')">o1D</th>
-        <th onclick="sortTable(10, ' M (', 'activeChannels')">i1D</th>
-        <th onclick="sortTable(11, ' M (', 'activeChannels')">o7D</th>
-        <th onclick="sortTable(12, ' M (', 'activeChannels')">i7D</th>
+        <th onclick="sortTable(9, ' m (', 'activeChannels')">o1D</th>
+        <th onclick="sortTable(10, ' m (', 'activeChannels')">i1D</th>
+        <th onclick="sortTable(11, ' m (', 'activeChannels')">o7D</th>
+        <th onclick="sortTable(12, ' m (', 'activeChannels')">i7D</th>
         <th onclick="sortTable(13, 'int', 'activeChannels')">iRate</th>
         <th onclick="sortTable(14, 'int', 'activeChannels')">iBase</th>
         <th title="When AR is ENABLED for the channel, keep pulling IN to the channel until its inbound liquidity falls below the iTarget%." width=4%>iTarget%</th>
@@ -659,7 +659,7 @@
     <form action="/closechannel/" method="post">
       {% csrf_token %}
       <label for="chan_id">Channel ID: </label>
-      <input id="chan_id" type="number" name="chan_id">
+      <input id="chan_id" type="text" name="chan_id">
       <label for="target_fee">Target Fee: </label>
       <input id="target_fee" type="number" min="1" max="100" name="target_fee">
       <label for="force">Force Close? </label>
@@ -676,29 +676,6 @@
       <label for="value">Invoice Amount: </label>
       <input id="value" type="number" name="value">
       <input type="submit" value="OK">
-    </form>
-  </div>
-</div>
-<div class="w3-container w3-padding-small">
-  <h2>Update Channel Policy</h2>
-  <div class="w3-container w3-padding-32">
-    <form action="/updatechanpolicy/" method="post">
-      {% csrf_token %}
-      <label for="new_base_fee">New Base Fee: </label>
-      <input id="new_base_fee" type="number" min="0" name="new_base_fee">
-      <label for="new_fee_rate">New Fee Rate: </label>
-      <input id="new_fee_rate" type="number" min="0" name="new_fee_rate">
-      <label for="new_cltv">New CLTV: </label>
-      <input id="new_cltv" type="number" min="18" name="new_cltv">
-      <label for="target_all">Target All Channels? </label>
-      <input id="target_all" type="checkbox" name="target_all">
-      <input type="submit" value="OK">
-      <ul class="w3-ul w3-border" style="width:35.2%">
-        <li><h3><label for="target_chans">Select Channels To Update: </label></h3></li>
-        {% for channel in chan_policy_form.target_chans %}
-          <li>{{ channel }}</li>
-        {% endfor %}
-      </ul>
     </form>
   </div>
 </div>
