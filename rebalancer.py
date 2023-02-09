@@ -35,7 +35,8 @@ def inbound_cans_len(inbound_cans):
 
 async def run_rebalancer(rebalance, worker):
     try:
-        auto_rebalance_channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(percent_outbound=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).annotate(inbound_can=(((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity'))/Sum('ar_in_target'))
+        #Reduce potential rebalance value in percent out to avoid going below AR-OUT-Target
+        auto_rebalance_channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(percent_outbound=((Sum('local_balance')+Sum('pending_outbound')-rebalance.value)*100)/Sum('capacity')).annotate(inbound_can=(((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity'))/Sum('ar_in_target'))
         outbound_cans = await get_out_cans(rebalance, auto_rebalance_channels)
         if len(outbound_cans) == 0 and rebalance.manual == False:
             print (f"{datetime.now().strftime('%c')} : No outbound_cans")
@@ -104,10 +105,12 @@ async def run_rebalancer(rebalance, worker):
 
             if rebalance.status ==2:
                 await update_channels(stub, rebalance.last_hop_pubkey, successful_out)
-                auto_rebalance_channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(percent_outbound=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).annotate(inbound_can=(((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity'))/Sum('ar_in_target'))
+                #Reduce potential rebalance value in percent out to avoid going below AR-OUT-Target
+                auto_rebalance_channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(percent_outbound=((Sum('local_balance')+Sum('pending_outbound')-rebalance.value*inc)*100)/Sum('capacity')).annotate(inbound_can=(((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity'))/Sum('ar_in_target'))
                 inbound_cans = auto_rebalance_channels.filter(remote_pubkey=rebalance.last_hop_pubkey).filter(auto_rebalance=True, inbound_can__gte=1)
                 outbound_cans = await get_out_cans(rebalance, auto_rebalance_channels)
                 rebalance.target_alias += ' ==> (' + str(int(payment_response.fee_msat/payment_response.value_msat*1000000)) + ')'
+                await save_record(rebalance)
 
                 if await inbound_cans_len(inbound_cans) > 0 and len(outbound_cans) > 0:
                     next_rebalance = Rebalancer(value=int(rebalance.value*inc), fee_limit=round(rebalance.fee_limit*inc, 3), outgoing_chan_ids=str(outbound_cans).replace('\'', ''), last_hop_pubkey=rebalance.last_hop_pubkey, target_alias=original_alias, duration=1)
