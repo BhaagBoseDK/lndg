@@ -303,8 +303,8 @@ async def async_queue_manager(rebalancer_queue):
     if rebal_count > 0:
         for rebalance in pending_rebalances:
             await rebalancer_queue.put(rebalance)
-    while True:
-        try:
+    try:
+        while True:
             global active_rebalances
             print (f"{datetime.now().strftime('%c')} : Queue currently has {rebalancer_queue.qsize()=} items...")
             print (f"{datetime.now().strftime('%c')} : There are currently {len(active_rebalances)=} tasks in progress...")
@@ -322,10 +322,10 @@ async def async_queue_manager(rebalancer_queue):
                 shutdown_rebalancer = True
                 return
             await asyncio.sleep(69)
-        except Exception as e:
-            print (f"{datetime.now().strftime('%c')} : Queue manager exception: {str(e)=}")
-        finally:
-            print (f"{datetime.now().strftime('%c')} : Queue manager has shut down...")
+    except Exception as e:
+        print (f"{datetime.now().strftime('%c')} : Queue manager exception: {str(e)=}")
+    finally:
+        print (f"{datetime.now().strftime('%c')} : Queue manager has shut down...")
 
 async def async_run_rebalancer(worker, rebalancer_queue):
     while True:
