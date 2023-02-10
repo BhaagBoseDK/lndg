@@ -40,6 +40,9 @@ async def run_rebalancer(rebalance, worker):
         outbound_cans = await get_out_cans(rebalance, auto_rebalance_channels)
         if len(outbound_cans) == 0 and rebalance.manual == False:
             print (f"{datetime.now().strftime('%c')} : No outbound_cans")
+            rebalance.status = 400
+            rebalance.stop = datetime.now()
+            await save_record(rebalance)
             return None
         elif str(outbound_cans).replace('\'', '') != rebalance.outgoing_chan_ids and rebalance.manual == False:
             rebalance.outgoing_chan_ids = str(outbound_cans).replace('\'', '')
