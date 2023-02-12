@@ -17,21 +17,21 @@ def get_out_cans(rebalance, auto_rebalance_channels):
     try:
         return list(auto_rebalance_channels.filter(auto_rebalance=False, percent_outbound__gte=F('ar_out_target')).exclude(remote_pubkey=rebalance.last_hop_pubkey).values_list('chan_id', flat=True))
     except Exception as e:
-        print(datetime.now(), 'Error getting outbound cands:', str(e))
+        print (f"{datetime.now().strftime('%c')} : Error getting outbound cands: {str(e)=}")
 
 @sync_to_async
 def save_record(record):
     try:
         record.save()
     except Exception as e:
-        print (f"{datetime.now()} Error saving database record: {str(e)=}")
+        print (f"{datetime.now().strftime('%c')} : Error saving database record: {str(e)=}")
 
 @sync_to_async
 def inbound_cans_len(inbound_cans):
     try:
         return len(inbound_cans)
     except Exception as e:
-        print (f"{datetime.now()} Error getting inbound cands: {str(e)=}")
+        print (f"{datetime.now().strftime('%c')} : Error getting inbound cands: {str(e)=}")
 
 async def run_rebalancer(rebalance, worker):
     try:
@@ -55,13 +55,9 @@ async def run_rebalancer(rebalance, worker):
             chan_ids = json.loads(rebalance.outgoing_chan_ids)
             timeout = rebalance.duration * 60
             invoice_response = stub.AddInvoice(ln.Invoice(value=rebalance.value, expiry=timeout))
-            print (f"{datetime.now().strftime('%c')} : {worker=} Starting Rebalance for {rebalance.target_alias=} {rebalance.last_hop_pubkey=} {rebalance.value=} {rebalance.duration=} via {chan_ids=}", sep=' : ' )
-            #Save with inflight status
-            rebalance.status = 0
-            rebalance.payment_hash = ''
-            #rebalance.save()
-            async for payment_response in routerstub.SendPaymentV2(lnr.SendPaymentRequest(payment_request=str(invoice_response.payment_request), fee_limit_msat=int(rebalance.fee_limit*1000), outgoing_chan_ids=chan_ids, last_hop_pubkey=bytes.fromhex(rebalance.last_hop_pubkey), timeout_seconds=(timeout-5), allow_self_payment=True, no_inflight_updates=False), timeout=(timeout+60)):
-                #print (f"{datetime.now().strftime('%c')} : DEBUG Payment Response {payment_response.status=} {payment_response.fee_msat/1000=} {payment_response.failure_reason=} {payment_response.payment_hash=}", sep=' : ' )
+            print (f"{datetime.now().strftime('%c')} : {worker=} starting rebalance for: {rebalance.target_alias=} {rebalance.last_hop_pubkey=} {rebalance.value=} {rebalance.duration=} {chan_ids=}")
+            async for payment_response in routerstub.SendPaymentV2(lnr.SendPaymentRequest(payment_request=str(invoice_response.payment_request), fee_limit_msat=int(rebalance.fee_limit*1000), outgoing_chan_ids=chan_ids, last_hop_pubkey=bytes.fromhex(rebalance.last_hop_pubkey), timeout_seconds=(timeout-5), allow_self_payment=True), timeout=(timeout+60)):
+                print (f"{datetime.now().strftime('%c')} : {worker=} got a payment response: {payment_response.status=} {payment_response.failure_reason=} {payment_response.payment_hash=}")
                 rebalance.payment_hash = payment_response.payment_hash
                 if payment_response.status == 1 and rebalance.status == 0:
                     #IN-FLIGHT
@@ -97,8 +93,7 @@ async def run_rebalancer(rebalance, worker):
                 rebalance.status = 408
             else:
                 rebalance.status = 400
-                error = str(e)
-                print(error)
+                print (f"{datetime.now().strftime('%c')} : Error while sending payment: {str(e)=}")
         finally:
             rebalance.stop = datetime.now()
             await save_record(rebalance)
@@ -120,13 +115,15 @@ async def run_rebalancer(rebalance, worker):
                     next_rebalance = Rebalancer(value=int(rebalance.value*inc), fee_limit=round(rebalance.fee_limit*inc, 3), outgoing_chan_ids=str(outbound_cans).replace('\'', ''), last_hop_pubkey=rebalance.last_hop_pubkey, target_alias=original_alias, duration=1)
                     await save_record(next_rebalance)
                     print (f"{datetime.now().strftime('%c')} : RapidFire up {next_rebalance.target_alias=} {next_rebalance.value=} {rebalance.value=}")
+                else:
+                    next_rebalance = None
             elif rebalance.status > 2 and rebalance.duration <= 1 and rebalance.value > 69420:
                 #Previous Rapidfire with increased value failed, try with lower value up to 69420.
                 inbound_cans = auto_rebalance_channels.filter(remote_pubkey=rebalance.last_hop_pubkey).filter(auto_rebalance=True, inbound_can__gte=1)
                 if await inbound_cans_len(inbound_cans) > 0 and len(outbound_cans) > 0:
                     next_rebalance = Rebalancer(value=int(rebalance.value/dec), fee_limit=round(rebalance.fee_limit/dec, 3), outgoing_chan_ids=str(outbound_cans).replace('\'', ''), last_hop_pubkey=rebalance.last_hop_pubkey, target_alias=original_alias, duration=1)
                     await save_record(next_rebalance)
-                    print (f"{datetime.now()} RapidFire Down {next_rebalance.target_alias=} {next_rebalance.value=} {rebalance.value=}")
+                    print (f"{datetime.now().strftime('%c')} : RapidFire Down {next_rebalance.target_alias=} {next_rebalance.value=} {rebalance.value=}")
                 else:
                     next_rebalance = None
             else:
@@ -151,7 +148,7 @@ def update_channels(stub, incoming_channel, outgoing_channel):
         db_channel.remote_balance = channel.remote_balance
         db_channel.save()
     except Exception as e:
-        print(datetime.now(), 'Error updating channel balances:', str(e))
+        print (f"{datetime.now().strftime('%c')} : Error updating channel balances: {str(e)=}")
 
 @sync_to_async
 def auto_schedule():
@@ -209,18 +206,17 @@ def auto_schedule():
                                     last_rebalance = Rebalancer.objects.filter(last_hop_pubkey=target.remote_pubkey).exclude(status=0).order_by('-id')[0]
                                     if not (last_rebalance.status == 2 or (last_rebalance.status in [3, 4, 5, 6, 7, 400, 408] and (int((datetime.now() - last_rebalance.stop).total_seconds() / 60) > wait_period)) or (last_rebalance.status == 1 and (int((datetime.now() - last_rebalance.start).total_seconds() / 60) > wait_period))):
                                         continue
-                                print( datetime.now().strftime('%c'), ' : Creating Auto Rebalance Request')
-                                print('Request for:', target.alias, ' : [', round(target.inbound_can,2), '] :', target.chan_id)
-                                print('Request routing through:', outbound_cans)
-                                print('Target Value:', target_value, '/', target.ar_amt_target)
-                                print('Target Fee:', target_fee)
-                                print('Target Time:', target_time)
+                                print (f"{datetime.now().strftime('%c')} : Creating Auto Rebalance Request for: {target.chan_id=}")
+                                print (f"{datetime.now().strftime('%c')} : Request routing through: {outbound_cans=}")
+                                print (f"{datetime.now().strftime('%c')} : {target_value=} / {target.ar_amt_target=}")
+                                print (f"{datetime.now().strftime('%c')} : {target_fee=}")
+                                print (f"{datetime.now().strftime('%c')} : {target_time}")
                                 new_rebalance = Rebalancer(value=target_value, fee_limit=target_fee, outgoing_chan_ids=str(outbound_cans).replace('\'', ''), last_hop_pubkey=target.remote_pubkey, target_alias=target.alias, duration=target_time)
                                 new_rebalance.save()
                                 scheduled_ids.append(new_rebalance.id)
         return scheduled_ids
     except Exception as e:
-        print (f"{datetime.now().strftime('%c')} : Error scheduling rebalances: {str(e)=}")
+        print (f"{datetime.now().strftime('%c')} : Error scheduling rebalances: {str(e)}")
 
 @sync_to_async
 def auto_enable():
@@ -255,7 +251,7 @@ def auto_enable():
                     #print('Processing: ', peer_channel.alias, ' : ', peer_channel.chan_id, ' : ', oapD, " : ", iapD, ' : ', outbound_percent, ' : ', inbound_percent)
                     if peer_channel.ar_out_target == 100 and peer_channel.auto_rebalance == True:
                         #Special Case for LOOP, Wos, etc. Always Auto Rebalance if enabled to keep outbound full.
-                        #print (f"{datetime.now().strftime('%c')} : Pass {peer_channel.alias=} {peer_channel.chan_id=} {peer_channel.ar_out_target=} {peer_channel.auto_rebalance=}")
+                        #print (f"{datetime.now().strftime('%c')} : Skipping AR enabled and 100% oTarget channel... {peer_channel.alias=} {peer_channel.chan_id=}")
                         pass
                     elif oapD > (iapD*1.10) and outbound_percent > 75:
                         #print('Case 1: Pass')
@@ -265,7 +261,7 @@ def auto_enable():
                         peer_channel.auto_rebalance = True
                         peer_channel.save()
                         Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting='Enabled', old_value=0, new_value=1).save()
-                        print (f"{datetime.now().strftime('%c')} : Auto Pilot Enabled {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=}")
+                        print (f"{datetime.now().strftime('%c')} : Auto Pilot Enabled: {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=}")
                     elif oapD < (iapD*1.10) and outbound_percent > 75 and peer_channel.auto_rebalance == True:
                         #print('Case 3: Disable AR - o7D < i7D AND Outbound Liq > 75%')
                         peer_channel.auto_rebalance = False
@@ -292,7 +288,7 @@ def get_scheduled_rebal(id):
     try:
         return Rebalancer.objects.get(id=id)
     except Exception as e:
-        print(datetime.now(), 'Error getting scheduled rebalances:', str(e))
+        print (f"{datetime.now().strftime('%c')} : Error getting scheduled rebalances: {str(e)=}")
 
 @sync_to_async
 def get_pending_rebals():
@@ -300,7 +296,7 @@ def get_pending_rebals():
         rebalances = Rebalancer.objects.filter(status=0).order_by('id')
         return rebalances, len(rebalances)
     except Exception as e:
-        print(datetime.now(), 'Error getting pending rebalances:', str(e))
+        print (f"{datetime.now().strftime('%c')} : Error getting pending rebalances: {str(e)=}")
 
 shutdown_rebalancer = False
 active_rebalances = []
