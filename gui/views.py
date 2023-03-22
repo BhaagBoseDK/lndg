@@ -1,6 +1,6 @@
 from django.contrib import messages
 from django.shortcuts import get_object_or_404, render, redirect
-from django.db.models import Sum, IntegerField, Count, F, Q
+from django.db.models import Sum, IntegerField, Count, Max, F, Q
 from django.db.models.functions import Round
 from django.contrib.auth.decorators import login_required
 from datetime import datetime, timedelta
@@ -8,15 +8,17 @@ from rest_framework import viewsets
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
-from .forms import OpenChannelForm, CloseChannelForm, ConnectPeerForm, AddInvoiceForm, RebalancerForm, UpdateChannel, UpdateSetting, AutoRebalanceForm, AddTowerForm, RemoveTowerForm, DeleteTowerForm, BatchOpenForm, UpdatePending, UpdateClosing, UpdateKeysend, AddAvoid, RemoveAvoid
+from .forms import OpenChannelForm, CloseChannelForm, ConnectPeerForm, AddInvoiceForm, RebalancerForm, UpdateChannel, UpdateSetting, LocalSettingsForm, AddTowerForm, RemoveTowerForm, DeleteTowerForm, BatchOpenForm, UpdatePending, UpdateClosing, UpdateKeysend, AddAvoid, RemoveAvoid
 from .models import Payments, PaymentHops, Invoices, Forwards, Channels, Rebalancer, LocalSettings, Peers, Onchain, Closures, Resolutions, PendingHTLCs, FailedHTLCs, Autopilot, Autofees, PendingChannels, AvoidNodes, PeerEvents
-from .serializers import ConnectPeerSerializer, FailedHTLCSerializer, LocalSettingsSerializer, OpenChannelSerializer, CloseChannelSerializer, AddInvoiceSerializer, PaymentHopsSerializer, PaymentSerializer, InvoiceSerializer, ForwardSerializer, ChannelSerializer, PendingHTLCSerializer, RebalancerSerializer, UpdateAliasSerializer, PeerSerializer, OnchainSerializer, ClosuresSerializer, ResolutionsSerializer
+from .serializers import ConnectPeerSerializer, FailedHTLCSerializer, LocalSettingsSerializer, OpenChannelSerializer, CloseChannelSerializer, AddInvoiceSerializer, PaymentHopsSerializer, PaymentSerializer, InvoiceSerializer, ForwardSerializer, ChannelSerializer, PendingHTLCSerializer, RebalancerSerializer, UpdateAliasSerializer, PeerSerializer, OnchainSerializer, ClosuresSerializer, ResolutionsSerializer, BumpFeeSerializer
 from gui.lnd_deps import lightning_pb2 as ln
 from gui.lnd_deps import lightning_pb2_grpc as lnrpc
 from gui.lnd_deps import router_pb2 as lnr
 from gui.lnd_deps import router_pb2_grpc as lnrouter
 from gui.lnd_deps import wtclient_pb2 as wtrpc
 from gui.lnd_deps import wtclient_pb2_grpc as wtstub
+from gui.lnd_deps import walletkit_pb2 as walletrpc
+from gui.lnd_deps import walletkit_pb2_grpc as walletstub
 from gui.lnd_deps.lnd_connect import lnd_connect
 from lndg import settings
 from os import path
@@ -154,9 +156,9 @@ def home(request):
             #Get recorded invoice details
             invoices = Invoices.objects.exclude(state=2)
             #Get recorded forwarding events
-            forwards = Forwards.objects.all().annotate(amt_in=Sum('amt_in_msat')/1000).annotate(amt_out=Sum('amt_out_msat')/1000).annotate(ppm=Round((Sum('fee')*1000000000)/Sum('amt_out_msat'), output_field=IntegerField())).order_by('-id')
+            forwards = Forwards.objects.all().annotate(amt_in=Sum('amt_in_msat')/1000, amt_out=Sum('amt_out_msat')/1000, ppm=Round((Sum('fee')*1000000000)/Sum('amt_out_msat'), output_field=IntegerField())).order_by('-id')
             #Get current active channels
-            active_channels = channels.filter(is_active=True, is_open=True, private=False).annotate(outbound_percent=((Sum('local_balance')+Sum('pending_outbound'))*1000)/Sum('capacity')).annotate(inbound_percent=((Sum('remote_balance')+Sum('pending_inbound'))*1000)/Sum('capacity')).order_by('outbound_percent')
+            active_channels = channels.filter(is_active=True, is_open=True, private=False).annotate(outbound_percent=((Sum('local_balance')+Sum('pending_outbound'))*1000)/Sum('capacity'), inbound_percent=((Sum('remote_balance')+Sum('pending_inbound'))*1000)/Sum('capacity')).order_by('outbound_percent')
             active_capacity = 0 if active_channels.count() == 0 else active_channels.aggregate(Sum('capacity'))['capacity__sum']
             active_inbound = 0 if active_capacity == 0 else active_channels.aggregate(Sum('remote_balance'))['remote_balance__sum']
             active_outbound = 0 if active_capacity == 0 else active_channels.aggregate(Sum('local_balance'))['local_balance__sum']
@@ -237,7 +239,7 @@ def home(request):
             #Get current inactive channels
             inactive_channels = channels.filter(is_active=False, is_open=True, private=False).annotate(outbound_percent=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).annotate(inbound_percent=((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity')).order_by('last_update')
             inactive_capacity = 0 if inactive_channels.count() == 0 else inactive_channels.aggregate(Sum('capacity'))['capacity__sum']
-            private_channels = channels.filter(is_open=True, private=True).annotate(outbound_percent=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).annotate(inbound_percent=((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity')).order_by('outbound_percent')
+            private_channels = channels.filter(is_open=True, private=True).annotate(outbound_percent=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity'), inbound_percent=((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity')).order_by('outbound_percent')
             inactive_outbound = 0 if inactive_channels.count() == 0 else inactive_channels.aggregate(Sum('local_balance'))['local_balance__sum']
             inactive_inbound = 0 if inactive_channels.count() == 0 else inactive_channels.aggregate(Sum('remote_balance'))['remote_balance__sum']
             private_count = private_channels.count()
@@ -258,10 +260,9 @@ def home(request):
             total_costs_7day = total_7day_fees + onchain_costs_7day
             total_costs_1day = total_1day_fees + onchain_costs_1day
             #Get list of recent rebalance requests
-            rebalances = Rebalancer.objects.all().annotate(ppm=Round((Sum('fee_limit')*1000000)/Sum('value'), output_field=IntegerField())).order_by('-id')
             active_count = node_info.num_active_channels - active_private
             total_channels = node_info.num_active_channels + node_info.num_inactive_channels - private_count
-            local_settings = LocalSettings.objects.filter(key__contains='AR-').order_by('key')
+            local_settings = get_local_settings('AR-')
             try:
                 db_size = round(path.getsize(path.expanduser(settings.LND_DATABASE_PATH))*0.000000001, 3)
             except:
@@ -316,7 +317,6 @@ def home(request):
                 'pending_closed': pending_closed,
                 'pending_force_closed': pending_force_closed,
                 'waiting_for_close': waiting_for_close,
-                'rebalances': rebalances[:21],
                 'local_settings': local_settings,
                 'pending_htlc_count': pending_htlc_count,
                 'failed_htlcs': FailedHTLCs.objects.exclude(wire_failure=99).order_by('-id')[:21],
@@ -528,7 +528,7 @@ def fees(request):
             channels_df['eligible'] = channels_df.apply(lambda row: (datetime.now()-row['fees_updated']).total_seconds() > (update_hours*3600), axis=1)
         context = {
             'channels': [] if channels_df.empty else channels_df.sort_values(by=['out_percent']).to_dict(orient='records'),
-            'local_settings': LocalSettings.objects.filter(key__contains='AF-').order_by('key'),
+            'local_settings': get_local_settings('AF-'),
             'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links(),
             'network_links': network_links()
@@ -540,7 +540,7 @@ def fees(request):
 @is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def advanced(request):
     if request.method == 'GET':
-        channels = Channels.objects.filter(is_open=True).annotate(outbound_percent=((Sum('local_balance')+Sum('pending_outbound'))*1000)/Sum('capacity')).annotate(inbound_percent=((Sum('remote_balance')+Sum('pending_inbound'))*1000)/Sum('capacity')).order_by('-is_active', 'outbound_percent')
+        channels = Channels.objects.filter(is_open=True).annotate(outbound_percent=((Sum('local_balance')+Sum('pending_outbound'))*1000)/Sum('capacity'), inbound_percent=((Sum('remote_balance')+Sum('pending_inbound'))*1000)/Sum('capacity')).order_by('-is_active', 'outbound_percent')
         channels_df = DataFrame.from_records(channels.values())
         if channels_df.shape[0] > 0:
             channels_df['out_percent'] = channels_df.apply(lambda row: int(round(row['outbound_percent']/10, 0)), axis=1)
@@ -552,7 +552,7 @@ def advanced(request):
             channels_df['local_max_htlc'] = channels_df['local_max_htlc_msat']/1000
         context = {
             'channels': channels_df.to_dict(orient='records'),
-            'local_settings': LocalSettings.objects.all().order_by('key'),
+            'local_settings': get_local_settings('AF-', 'AR-', 'GUI-', 'LND-'),
             'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links(),
             'network_links': network_links()
@@ -576,10 +576,9 @@ def route(request):
                 'total_cost': total_cost,
                 'total_ppm': total_ppm,
                 'route': route,
-                'rebalances': Rebalancer.objects.filter(payment_hash=payment_hash).annotate(ppm=Round((Sum('fee_limit')*1000000)/Sum('value'), output_field=IntegerField())),
                 'invoices': Invoices.objects.filter(r_hash=payment_hash),
-                'incoming_htlcs': PendingHTLCs.objects.filter(incoming=True, hash_lock=payment_hash).annotate(blocks_til_expiration=Sum('expiration_height')-block_height).annotate(hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('hash_lock'),
-                'outgoing_htlcs': PendingHTLCs.objects.filter(incoming=False, hash_lock=payment_hash).annotate(blocks_til_expiration=Sum('expiration_height')-block_height).annotate(hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('hash_lock')
+                'incoming_htlcs': PendingHTLCs.objects.filter(incoming=True, hash_lock=payment_hash).annotate(blocks_til_expiration=Sum('expiration_height')-block_height, hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('hash_lock'),
+                'outgoing_htlcs': PendingHTLCs.objects.filter(incoming=False, hash_lock=payment_hash).annotate(blocks_til_expiration=Sum('expiration_height')-block_height, hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('hash_lock')
             }
             return render(request, 'route.html', context)
         except Exception as e:
@@ -621,9 +620,9 @@ def peers(request):
 @is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def balances(request):
     if request.method == 'GET':
-        stub = lnrpc.LightningStub(lnd_connect())
+        stub = walletstub.WalletKitStub(lnd_connect())
         context = {
-            'utxos': stub.ListUnspent(ln.ListUnspentRequest(min_confs=0, max_confs=9999999)).utxos,
+            'utxos': stub.ListUnspent(walletrpc.ListUnspentRequest(min_confs=0, max_confs=9999999)).utxos,
             'transactions': list(Onchain.objects.filter(block_height=0)) + list(Onchain.objects.exclude(block_height=0).order_by('-block_height')),
             'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'network_links': network_links()
@@ -1399,9 +1398,7 @@ def opens(request):
         exlcude_list = AvoidNodes.objects.values_list('pubkey')
         filter_60day = datetime.now() - timedelta(days=60)
         payments_60day = Payments.objects.filter(creation_date__gte=filter_60day).values_list('payment_hash')
-        open_list = PaymentHops.objects.filter(payment_hash__in=payments_60day).exclude(node_pubkey=self_pubkey).exclude(node_pubkey__in=current_peers).exclude(node_pubkey__in=exlcude_list).values('node_pubkey').annotate(ppm=(Sum('fee')/Sum('amt'))*1000000).annotate(score=Round((Round(Count('id')/5, output_field=IntegerField())+Round(Sum('amt')/500000, output_field=IntegerField()))/10, output_field=IntegerField())).annotate(count=Count('id')).annotate(amount=Sum('amt')).annotate(fees=Sum('fee')).annotate(sum_cost_to=Sum('cost_to')/(Sum('amt')/1000000)).exclude(score=0).order_by('-score', 'ppm')[:21]
-        for open in open_list:
-            open['alias'] = PaymentHops.objects.filter(node_pubkey=open['node_pubkey']).order_by('-id')[0].alias
+        open_list = PaymentHops.objects.filter(payment_hash__in=payments_60day).exclude(node_pubkey=self_pubkey).exclude(node_pubkey__in=current_peers).exclude(node_pubkey__in=exlcude_list).values('node_pubkey').annotate(ppm=(Sum('fee')/Sum('amt'))*1000000, score=Round((Round(Count('id')/5, output_field=IntegerField())+Round(Sum('amt')/500000, output_field=IntegerField()))/10, output_field=IntegerField()), count=Count('id'), amount=Sum('amt'), fees=Sum('fee'), sum_cost_to=Sum('cost_to')/(Sum('amt')/1000000), alias=Max('alias')).exclude(score=0).order_by('-score', 'ppm')[:21]
         context = {
             'open_list': open_list,
             'avoid_list': AvoidNodes.objects.all(),
@@ -1415,7 +1412,7 @@ def opens(request):
 @is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def actions(request):
     if request.method == 'GET':
-        channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(outbound_percent=((Sum('local_balance')+Sum('pending_outbound'))*1000)/Sum('capacity')).annotate(inbound_percent=((Sum('remote_balance')+Sum('pending_inbound'))*1000)/Sum('capacity'))
+        channels = Channels.objects.filter(is_active=True, is_open=True, private=False).annotate(outbound_percent=((Sum('local_balance')+Sum('pending_outbound'))*1000)/Sum('capacity'), inbound_percent=((Sum('remote_balance')+Sum('pending_inbound'))*1000)/Sum('capacity'))
         filter_7day = datetime.now() - timedelta(days=7)
         forwards = Forwards.objects.filter(forward_date__gte=filter_7day)
         action_list = []
@@ -1480,8 +1477,8 @@ def pending_htlcs(request):
         stub = lnrpc.LightningStub(lnd_connect())
         block_height = stub.GetInfo(ln.GetInfoRequest()).block_height
         context = {
-            'incoming_htlcs': PendingHTLCs.objects.filter(incoming=True).annotate(blocks_til_expiration=Sum('expiration_height')-block_height).annotate(hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('hash_lock'),
-            'outgoing_htlcs': PendingHTLCs.objects.filter(incoming=False).annotate(blocks_til_expiration=Sum('expiration_height')-block_height).annotate(hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('hash_lock')
+            'incoming_htlcs': PendingHTLCs.objects.filter(incoming=True).annotate(blocks_til_expiration=Sum('expiration_height')-block_height, hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('hash_lock'),
+            'outgoing_htlcs': PendingHTLCs.objects.filter(incoming=False).annotate(blocks_til_expiration=Sum('expiration_height')-block_height, hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('hash_lock')
         }
         return render(request, 'pending_htlcs.html', context)
     else:
@@ -1496,10 +1493,7 @@ def failed_htlcs(request):
             direction = None if query is None or len(query) < 2 else query[1]
             failed_htlcs = FailedHTLCs.objects.exclude(wire_failure=99).order_by('-id')[:150] if chan_id is None else (FailedHTLCs.objects.exclude(wire_failure=99).filter(chan_id_out=chan_id).order_by('-id')[:150] if direction == "O" else FailedHTLCs.objects.exclude(wire_failure=99).filter(chan_id_in=chan_id).order_by('-id')[:150])
             filter_7day = datetime.now() - timedelta(days=7)
-            agg_failed_htlcs = FailedHTLCs.objects.filter(timestamp__gte=filter_7day, wire_failure=99).values('chan_id_in', 'chan_id_out').annotate(count=Count('id')).annotate(volume=Sum('amount')).order_by('-count')[:21]
-            for failed_htlc in agg_failed_htlcs:
-                failed_htlc['chan_in_alias'] = Channels.objects.get(chan_id=failed_htlc['chan_id_in']).alias
-                failed_htlc['chan_out_alias'] = Channels.objects.get(chan_id=failed_htlc['chan_id_out']).alias
+            agg_failed_htlcs = FailedHTLCs.objects.filter(timestamp__gte=filter_7day, wire_failure=99).values('chan_id_in', 'chan_id_out').annotate(count=Count('id'), volume=Sum('amount'), chan_in_alias=Max('chan_in_alias'), chan_out_alias=Max('chan_out_alias')).order_by('-count')[:21]
             context = {
                 'failed_htlcs': failed_htlcs,
                 'agg_failed_htlcs': agg_failed_htlcs
@@ -1539,13 +1533,7 @@ def invoices(request):
 def rebalances(request):
     if request.method == 'GET':
         try:
-            rebalances = Rebalancer.objects.all().annotate(ppm=Round((Sum('fee_limit')*1000000)/Sum('value'), output_field=IntegerField())).order_by('-id')
-            rebalances_success = rebalances.filter(status=2)
-            context = {
-                'rebalances': rebalances[:150],
-                'rebalances_success' : rebalances_success[:69]
-            }
-            return render(request, 'rebalances.html', context)
+            return render(request, 'rebalances.html')
         except Exception as e:
             try:
                 error = str(e.code())
@@ -1558,8 +1546,10 @@ def rebalances(request):
 @is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def batch(request):
     if request.method == 'GET':
+        stub = lnrpc.LightningStub(lnd_connect())
         context = {
             'iterator': range(1,11),
+            'balances': stub.WalletBalance(ln.WalletBalanceRequest())
         }
         return render(request, 'batch.html', context)
     else:
@@ -1706,7 +1696,7 @@ def batch_open(request):
 def forwards(request):
     if request.method == 'GET':
         context = {
-            'forwards': Forwards.objects.all().annotate(amt_in=Sum('amt_in_msat')/1000).annotate(amt_out=Sum('amt_out_msat')/1000).annotate(ppm=Round((Sum('fee')*1000000000)/Sum('amt_out_msat'), output_field=IntegerField())).order_by('-id')[:150],
+            'forwards': Forwards.objects.all().annotate(amt_in=Sum('amt_in_msat')/1000, amt_out=Sum('amt_out_msat')/1000, ppm=Round((Sum('fee')*1000000000)/Sum('amt_out_msat'), output_field=IntegerField())).order_by('-id')[:150],
         }
         return render(request, 'forwards.html', context)
     else:
@@ -1715,75 +1705,9 @@ def forwards(request):
 @is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def rebalancing(request):
     if request.method == 'GET':
-        channels_df = DataFrame.from_records(Channels.objects.filter(is_open=True, private=False).annotate(percent_inbound=((Sum('remote_balance')+Sum('pending_inbound'))*100)/Sum('capacity')).annotate(percent_outbound=((Sum('local_balance')+Sum('pending_outbound'))*100)/Sum('capacity')).order_by('-is_active', 'percent_outbound').values())
-        filter_7day = datetime.now() - timedelta(days=7)
-        rebalancer_7d_df = DataFrame.from_records(Rebalancer.objects.filter(stop__gte=filter_7day).order_by('-id').values())
-        if channels_df.shape[0] > 0:
-            channels_df['inbound_can'] = channels_df['percent_inbound'] / channels_df['ar_in_target']
-            channels_df['local_balance'] = channels_df['local_balance'] + channels_df['pending_outbound']
-            channels_df['remote_balance'] = channels_df['remote_balance'] + channels_df['pending_inbound']
-            channels_df['fee_ratio'] = channels_df.apply(lambda row: 100 if row['local_fee_rate'] == 0 else int(round(((row['remote_fee_rate']/row['local_fee_rate'])*1000)/10, 0)), axis=1)
-            channels_df['fee_check'] = channels_df.apply(lambda row: 1 if row['ar_max_cost'] == 0 else int(round(((row['fee_ratio']/row['ar_max_cost'])*1000)/10, 0)), axis=1)
-            channels_df['steps'] = channels_df.apply(lambda row: 0 if row['inbound_can'] < 1 else int(((row['percent_inbound']-row['ar_in_target'])/((row['ar_amt_target']/row['capacity'])*100))+0.999), axis=1)
-            rebalancer_count_7d_df = DataFrame() if rebalancer_7d_df.empty else rebalancer_7d_df[rebalancer_7d_df['status']>=2][rebalancer_7d_df['status']<400]
-            channels_df['attempts'] = channels_df.apply(lambda row: 0 if rebalancer_count_7d_df.empty else rebalancer_count_7d_df[rebalancer_count_7d_df['last_hop_pubkey']==row.remote_pubkey].shape[0], axis=1)
-            channels_df['success'] = channels_df.apply(lambda row: 0 if rebalancer_count_7d_df.empty else rebalancer_count_7d_df[rebalancer_count_7d_df['last_hop_pubkey']==row.remote_pubkey][rebalancer_count_7d_df['status']==2].shape[0], axis=1)
-            channels_df['success_rate'] = channels_df.apply(lambda row: 0 if row['attempts'] == 0 else int((row['success']/row['attempts'])*100), axis=1)
-            enabled_df = channels_df[channels_df['auto_rebalance']==True]
-            eligible_df = enabled_df[enabled_df['is_active']==True][enabled_df['inbound_can']>=1][enabled_df['fee_check']<100]
-            eligible_count = eligible_df.shape[0]
-            enabled_count = enabled_df.shape[0]
-            available_df = channels_df[channels_df['auto_rebalance']==False][channels_df['is_active']==True][channels_df['percent_outbound'] / channels_df['ar_out_target']>=1]
-            available_count = available_df.shape[0]
-        else:
-            eligible_count = 0
-            enabled_count = 0
-            available_count = 0
-        try:
-            query = request.GET.urlencode()[1:]
-            if query == '1':
-                #Filter Sink (AR Enabled)
-                channels_df = channels_df[channels_df['auto_rebalance']==True][channels_df['is_active']==True]
-            elif query == '2':
-                #Filter Source (Eligible to rebalance out)
-                channels_df = channels_df[channels_df['auto_rebalance']==False][channels_df['is_active']==True].sort_values(by=['percent_outbound'], ascending=False)
-            else:
-                #Proceed
-                pass
-        except Exception as e:
-            try:
-                error = str(e.code())
-            except:
-                error = str(e)
-            return render(request, 'error.html', {'error': error})
-        ar_settings = LocalSettings.objects.filter(key__contains='AR-').values('key', 'value').order_by('key')
-        form = [{'id': 'enabled', 'title':'This enables or disables the auto-scheduling function', 'min':0, 'max':1}, 
-                {'id': 'target_percent', 'title': 'The percentage of the total capacity to target as the rebalance amount', 'min':0.1, 'max':100},
-                {'id': 'target_time', 'title': 'The time spent per individual rebalance attempt', 'min':1, 'max':60},
-                {'id': 'fee_rate', 'title': 'The max rate we can ever use to refill a channel with outbound', 'min':0.1, 'max':2500},
-                {'id': 'outbound_percent', 'title': 'When a channel is not enabled for targeting; the minimum outbound a channel must have to be a source for refilling another channel', 'min':0.1, 'max':100},
-                {'id': 'inbound_percent', 'title': 'When a channel is enabled for targeting; the maximum inbound a channel can have before selected for auto rebalance', 'min':0.1, 'max':100},
-                {'id': 'max_cost', 'title': 'The ppm to target which is the percentage of the outbound fee rate for the channel being refilled', 'min':1, 'max':100},
-                {'id': 'variance', 'title': 'The percentage of the target amount to be randomly varied with every rebalance attempt', 'min':0, 'max':100},
-                {'id': 'wait_period', 'title': 'The minutes we should wait after a failed attempt before trying again', 'min':1, 'max':100},
-                {'id': 'autopilot', 'title': 'This enables or disables the Autopilot function which automatically acts upon suggestions on this page: /actions', 'min':0, 'max':1},
-                {'id': 'autopilotdays', 'title': 'Number of days to consider for autopilot. Default 7.', 'min':0, 'max':100}]
-        local_settings = []
-        for sett in ar_settings:
-            sett_text = sett['key'].replace("AR-", "").replace("%","percent").replace("AP","autopilot").lower()
-            for field in form:
-                field_text=field['id'].replace("_", "")
-                if field_text in sett_text or sett_text in field_text:
-                    local_settings.append({'id': field['id'], 'title': field['title'], 'min': field['min'], 'max':field['max'], 'label': sett['key'], 'value': sett['value']})
-                    form.remove(field)
-                    break
         context = {
-            'eligible_count': eligible_count,
-            'enabled_count': enabled_count,
-            'available_count': available_count,
-            'channels': channels_df.to_dict(orient='records'),
-            'rebalancer': Rebalancer.objects.all().annotate(ppm=Round((Sum('fee_limit')*1000000)/Sum('value'), output_field=IntegerField())).order_by('-id')[:69],
-            'local_settings': local_settings,
+            'rebalancer_form': RebalancerForm,
+            'local_settings': get_local_settings('AR-'),
             'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links()
         }
@@ -2026,11 +1950,10 @@ def rebalance(request):
         if form.is_valid():
             try:
                 if Channels.objects.filter(is_active=True, is_open=True, remote_pubkey=form.cleaned_data['last_hop_pubkey']).exists() or form.cleaned_data['last_hop_pubkey'] == '':
-                    chan_ids = []
-                    for channel in form.cleaned_data['outgoing_chan_ids']:
-                        chan_ids.append(channel.chan_id)
+                    chan_ids = [ch.chan_id for ch in form.cleaned_data['outgoing_chan_ids']]
                     if len(chan_ids) > 0:
-                        target_alias = Channels.objects.filter(is_active=True, is_open=True, remote_pubkey=form.cleaned_data['last_hop_pubkey'])[0].alias if Channels.objects.filter(is_active=True, is_open=True, remote_pubkey=form.cleaned_data['last_hop_pubkey']).exists() else ''
+                        target_channel = Channels.objects.filter(is_active=True, is_open=True, remote_pubkey=form.cleaned_data['last_hop_pubkey']).first()
+                        target_alias = target_channel.alias if target_channel.alias != '' else target_channel.remote_pubkey[:12]
                         fee_limit = round(form.cleaned_data['fee_limit']*form.cleaned_data['value']*0.000001, 3)
                         Rebalancer(value=form.cleaned_data['value'], fee_limit=fee_limit, outgoing_chan_ids=str(chan_ids).replace('\'', ''), last_hop_pubkey=form.cleaned_data['last_hop_pubkey'], target_alias=target_alias, duration=form.cleaned_data['duration'], manual=True).save()
                         messages.success(request, 'Rebalancer request created!')
@@ -2048,149 +1971,108 @@ def rebalance(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
+def get_local_settings(*prefixes):
+    form = []
+    if 'AR-' in prefixes:
+        form.append({'unit': '', 'form_id': 'update_channels', 'id': 'update_channels'})
+        form.append({'unit': '', 'form_id': 'enabled', 'value': 0, 'label': 'AR Enabled', 'id': 'AR-Enabled', 'title':'This enables or disables the auto-scheduling function', 'min':0, 'max':1},)
+        form.append({'unit': '%', 'form_id': 'target_percent', 'value': 0, 'label': 'AR Target Amount', 'id': 'AR-Target%', 'title': 'The percentage of the total capacity to target as the rebalance amount', 'min':0.1, 'max':100})
+        form.append({'unit': 'min', 'form_id': 'target_time', 'value': 0, 'label': 'AR Target Time', 'id': 'AR-Time', 'title': 'The time spent per individual rebalance attempt', 'min':1, 'max':60})
+        form.append({'unit': 'ppm', 'form_id': 'fee_rate', 'value': 0, 'label': 'AR Max Fee Rate', 'id': 'AR-MaxFeeRate', 'title': 'The max rate we can ever use to refill a channel with outbound', 'min':1, 'max':2500})
+        form.append({'unit': '%', 'form_id': 'outbound_percent', 'value': 0, 'label': 'AR Target Out Above', 'id': 'AR-Outbound%', 'title': 'When a channel is not enabled for targeting; the minimum outbound a channel must have to be a source for refilling another channel', 'min':1, 'max':100})
+        form.append({'unit': '%', 'form_id': 'inbound_percent', 'value': 0, 'label': 'AR Target In Above', 'id': 'AR-Inbound%', 'title': 'When a channel is enabled for targeting; the maximum inbound a channel can have before selected for auto rebalance', 'min':1, 'max':100})
+        form.append({'unit': '%', 'form_id': 'max_cost', 'value': 0, 'label': 'AR Max Cost', 'id': 'AR-MaxCost%', 'title': 'The ppm to target which is the percentage of the outbound fee rate for the channel being refilled', 'min':1, 'max':100})
+        form.append({'unit': '%', 'form_id': 'variance', 'value': 0, 'label': 'AR Variance', 'id': 'AR-Variance', 'title': 'The percentage of the target amount to be randomly varied with every rebalance attempt', 'min':0, 'max':100})
+        form.append({'unit': 'min', 'form_id': 'wait_period', 'value': 0, 'label': 'AR Wait Period', 'id': 'AR-WaitPeriod', 'title': 'The minutes we should wait after a failed attempt before trying again', 'min':1, 'max':100})
+        form.append({'unit': '', 'form_id': 'autopilot', 'value': 0, 'label': 'Autopilot', 'id': 'AR-Autopilot', 'title': 'This enables or disables the Autopilot function which automatically acts upon suggestions on this page: /actions', 'min':0, 'max':1})
+        form.append({'unit': 'days', 'form_id': 'autopilotdays', 'value': 0, 'label': 'Autopilot Days', 'id': 'AR-APDays', 'title': 'Number of days to consider for autopilot. Default 7', 'min':0, 'max':100})
+        form.append({'unit': '', 'form_id': 'workers', 'value': 1, 'label': 'Workers', 'id': 'AR-Workers', 'title': 'Number of workers', 'min':1, 'max':12})
+    if 'AF-' in prefixes:
+        form.append({'unit': '', 'form_id': 'af_enabled', 'value': 0, 'label': 'Autofee', 'id': 'AF-Enabled', 'title': 'Enable/Disable Auto-fee functionality', 'min':0, 'max':1})
+        form.append({'unit': 'ppm', 'form_id': 'af_maxRate', 'value': 0, 'label': 'AF Max Rate', 'id': 'AF-MaxRate', 'title': 'Minimum Rate', 'min':0, 'max':5000})
+        form.append({'unit': 'ppm', 'form_id': 'af_minRate', 'value': 0, 'label': 'AF Min Rate', 'id': 'AF-MinRate', 'title': 'Minimum Rate', 'min':0, 'max':5000})
+        form.append({'unit': 'ppm', 'form_id': 'af_increment', 'value': 0, 'label': 'AF Increment', 'id': 'AF-Increment', 'title': 'Amount to increment on each interaction', 'min':0, 'max':100})
+        form.append({'unit': '%', 'form_id': 'af_multiplier', 'value': 0, 'label': 'AF Multiplier', 'id': 'AF-Multiplier', 'title': 'Multiplier to be applied to Auto-Fee', 'min':0, 'max':100})
+        form.append({'unit': '', 'form_id': 'af_failedHTLCs', 'value': 0, 'label': 'AF FailedHTLCs', 'id': 'AF-FailedHTLCs', 'title': 'Failed HTLCs', 'min':0, 'max':100})
+        form.append({'unit': 'hours', 'form_id': 'af_updateHours', 'value': 0, 'label': 'AF Update', 'id': 'AF-UpdateHours', 'title': 'Number of hours to consider to update fees. Default 24', 'min':0, 'max':100})
+    if 'GUI-' in prefixes:
+        form.append({'unit': '', 'form_id': 'gui_graphLinks', 'value': graph_links(), 'label': 'Graph URL', 'id': 'GUI-GraphLinks', 'title': 'Preferred Graph URL'})
+        form.append({'unit': '', 'form_id': 'gui_netLinks', 'value': network_links(), 'label': 'NET URL', 'id': 'GUI-NetLinks', 'title': 'Preferred NET URL'})
+    if 'LND-' in prefixes:
+        form.append({'unit': '', 'form_id': 'lnd_cleanPayments', 'value': 0, 'label': 'LND Clean Payments', 'id': 'LND-CleanPayments', 'title': 'Clean LND Payments', 'min':0, 'max':1})
+        form.append({'unit': 'days', 'form_id': 'lnd_retentionDays', 'value': 30, 'label': 'LND Retention', 'id': 'LND-RetentionDays', 'title': 'LND Retention days'})
+
+    for prefix in prefixes:
+        ar_settings = LocalSettings.objects.filter(key__contains=prefix).values('key', 'value').order_by('key')
+        for field in form:
+            for sett in ar_settings:
+                if field['id'] == sett['key']:
+                    field['value'] = sett['value']
+                    break
+    return form
+
 @is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
-def auto_rebalance(request):
+def update_settings(request):
     if request.method == 'POST':
-        form = AutoRebalanceForm(request.POST)
-        if form.is_valid():
-            if form.cleaned_data['chan_id'] is not None:
-                target_chan_id = form.cleaned_data['chan_id']
-                target_channel = Channels.objects.filter(chan_id=target_chan_id)
-                if len(target_channel) == 1:
-                    target_channel = target_channel[0]
-                    target_channel.auto_rebalance = True if target_channel.auto_rebalance == False else False
-                    target_channel.save()
-                    messages.success(request, 'Updated auto rebalancer status for: ' + str(target_channel.chan_id))
-                else:
-                    messages.error(request, 'Failed to update auto rebalancer status of channel: ' + str(target_chan_id))
-            if form.cleaned_data['target_percent'] is not None:
-                target_percent = float(form.cleaned_data['target_percent'])
-                try:
-                    db_percent_target = LocalSettings.objects.get(key='AR-Target%')
-                except:
-                    LocalSettings(key='AR-Target%', value='5').save()
-                    db_percent_target = LocalSettings.objects.get(key='AR-Target%')
-                db_percent_target.value = target_percent
-                db_percent_target.save()
-                if form.cleaned_data['targetallchannels']:
-                    Channels.objects.all().update(ar_amt_target=Round(F('capacity')*(target_percent/100), output_field=IntegerField()))
-                    messages.success(request, 'Updated auto rebalancer target amount for all channels to: ' + str(target_percent))
-                else:
-                    messages.success(request, 'Updated auto rebalancer target amount in local settings: ' + str(target_percent))
-            if form.cleaned_data['target_time'] is not None:
-                target_time = form.cleaned_data['target_time']
-                try:
-                    db_time_target = LocalSettings.objects.get(key='AR-Time')
-                except:
-                    LocalSettings(key='AR-Time', value='5').save()
-                    db_time_target = LocalSettings.objects.get(key='AR-Time')
-                db_time_target.value = target_time
-                db_time_target.save()
-                messages.success(request, 'Updated auto rebalancer target time setting to: ' + str(target_time))
-            if form.cleaned_data['enabled'] is not None:
-                enabled = form.cleaned_data['enabled']
-                try:
-                    db_enabled = LocalSettings.objects.get(key='AR-Enabled')
-                except:
-                    LocalSettings(key='AR-Enabled', value='0').save()
-                    db_enabled = LocalSettings.objects.get(key='AR-Enabled')
-                db_enabled.value = enabled
-                db_enabled.save()
-                messages.success(request, 'Updated auto rebalancer enabled setting to: ' + str(enabled))
-            if form.cleaned_data['outbound_percent'] is not None:
-                outbound_percent = int(form.cleaned_data['outbound_percent'])
-                try:
-                    db_outbound_target = LocalSettings.objects.get(key='AR-Outbound%')
-                except:
-                    LocalSettings(key='AR-Outbound%', value='75').save()
-                    db_outbound_target = LocalSettings.objects.get(key='AR-Outbound%')
-                db_outbound_target.value = outbound_percent
-                db_outbound_target.save()
-                if form.cleaned_data['targetallchannels']:
-                    Channels.objects.all().update(ar_out_target=int(outbound_percent))
-                    messages.success(request, 'Updated auto rebalancer target outbound percent setting for all channels to: ' + str(outbound_percent))
-                else:
-                    messages.success(request, 'Updated auto rebalancer target outbound percent setting in local settings to: ' + str(outbound_percent))
-            if form.cleaned_data['inbound_percent'] is not None:
-                inbound_percent = int(form.cleaned_data['inbound_percent'])
-                try:
-                    db_inbound_target = LocalSettings.objects.get(key='AR-Inbound%')
-                except:
-                    LocalSettings(key='AR-Inbound%', value='100').save()
-                    db_inbound_target = LocalSettings.objects.get(key='AR-Inbound%')
-                db_inbound_target.value = inbound_percent
-                db_inbound_target.save()
-                if form.cleaned_data['targetallchannels']:
-                    Channels.objects.all().update(ar_in_target=int(inbound_percent))
-                    messages.success(request, 'Updated auto rebalancer target inbound percent setting for all channels to: ' + str(inbound_percent))
-                else:
-                    messages.success(request, 'Updated auto rebalancer target inbound percent setting in local settigs to: ' + str(inbound_percent))
-            if form.cleaned_data['fee_rate'] is not None:
-                fee_rate = form.cleaned_data['fee_rate']
-                try:
-                    db_fee_rate = LocalSettings.objects.get(key='AR-MaxFeeRate')
-                except:
-                    LocalSettings(key='AR-MaxFeeRate', value='100').save()
-                    db_fee_rate = LocalSettings.objects.get(key='AR-MaxFeeRate')
-                db_fee_rate.value = fee_rate
-                db_fee_rate.save()
-                messages.success(request, 'Updated auto rebalancer max fee rate setting to: ' + str(fee_rate))
-            if form.cleaned_data['max_cost'] is not None:
-                max_cost = int(form.cleaned_data['max_cost'])
-                try:
-                    db_max_cost = LocalSettings.objects.get(key='AR-MaxCost%')
-                except:
-                    LocalSettings(key='AR-MaxCost%', value='65').save()
-                    db_max_cost = LocalSettings.objects.get(key='AR-MaxCost%')
-                db_max_cost.value = max_cost
-                db_max_cost.save()
-                if form.cleaned_data['targetallchannels']:
-                    Channels.objects.all().update(ar_max_cost=int(max_cost))
-                    messages.success(request, 'Updated auto rebalancer max cost setting for all channels to: ' + str(max_cost))
-                else:
-                    messages.success(request, 'Updated auto rebalancer max cost setting in local settings to: ' + str(max_cost))
-            if form.cleaned_data['autopilot'] is not None:
-                autopilot = form.cleaned_data['autopilot']
-                try:
-                    db_autopilot = LocalSettings.objects.get(key='AR-Autopilot')
-                except:
-                    LocalSettings(key='AR-Autopilot', value='0').save()
-                    db_autopilot = LocalSettings.objects.get(key='AR-Autopilot')
-                db_autopilot.value = autopilot
-                db_autopilot.save()
-                messages.success(request, 'Updated autopilot setting to: ' + str(autopilot))
-            if form.cleaned_data['autopilotdays'] is not None:
-                autopilotdays = form.cleaned_data['autopilotdays']
-                try:
-                    db_autopilotdays = LocalSettings.objects.get(key='AR-APDays')
-                except:
-                    LocalSettings(key='AR-APDays', value='7').save()
-                    db_autopilotdays = LocalSettings.objects.get(key='AR-APDays')
-                db_autopilotdays.value = autopilotdays
-                db_autopilotdays.save()
-                messages.success(request, 'Updated autopilot days setting to: ' + str(autopilotdays))
-            if form.cleaned_data['variance'] is not None:
-                variance = form.cleaned_data['variance']
-                try:
-                    db_variance = LocalSettings.objects.get(key='AR-Variance')
-                except:
-                    LocalSettings(key='AR-Variance', value='0').save()
-                    db_variance = LocalSettings.objects.get(key='AR-Variance')
-                db_variance.value = variance
-                db_variance.save()
-                messages.success(request, 'Updated variance setting to: ' + str(variance))
-            if form.cleaned_data['wait_period'] is not None:
-                wait_period = form.cleaned_data['wait_period']
-                try:
-                    db_wait_period = LocalSettings.objects.get(key='AR-WaitPeriod')
-                except:
-                    LocalSettings(key='AR-WaitPeriod', value='30').save()
-                    db_wait_period = LocalSettings.objects.get(key='AR-WaitPeriod')
-                db_wait_period.value = wait_period
-                db_wait_period.save()
-                messages.success(request, 'Updated wait period setting to: ' + str(wait_period))
-        else:
+        template = [{'form_id': 'enabled', 'value': 0, 'parse': lambda x: x,'id': 'AR-Enabled'}, 
+                    {'form_id': 'target_percent', 'value': 5, 'parse': lambda x: float(x),'id': 'AR-Target%'},
+                    {'form_id': 'target_time', 'value': 5, 'parse': lambda x: x,'id': 'AR-Time'},
+                    {'form_id': 'fee_rate', 'value': 100, 'parse': lambda x: x,'id': 'AR-MaxFeeRate'},
+                    {'form_id': 'outbound_percent', 'value': 75, 'parse': lambda x: int(x),'id': 'AR-Outbound%'},
+                    {'form_id': 'inbound_percent', 'value': 100, 'parse': lambda x: int(x),'id': 'AR-Inbound%'},
+                    {'form_id': 'max_cost', 'value': 65, 'parse': lambda x: int(x),'id': 'AR-MaxCost%'},
+                    {'form_id': 'variance', 'value': 0, 'parse': lambda x: x,'id': 'AR-Variance'},
+                    {'form_id': 'wait_period', 'value': 30, 'parse': lambda x: x,'id': 'AR-WaitPeriod'},
+                    {'form_id': 'autopilot', 'value': 0, 'parse': lambda x: x,'id': 'AR-Autopilot'},
+                    {'form_id': 'autopilotdays', 'value': 7, 'parse': lambda x: x,'id': 'AR-APDays'},
+                    {'form_id': 'workers', 'value': 5, 'parse': lambda x: x,'id': 'AR-Workers'},
+                    #AF
+                    {'form_id': 'af_enabled', 'value': 0, 'parse': lambda x: int(x),'id': 'AF-Enabled'},
+                    {'form_id': 'af_maxRate', 'value': 2500, 'parse': lambda x: int(x),'id': 'AF-MaxRate'},
+                    {'form_id': 'af_minRate', 'value': 0, 'parse': lambda x: int(x),'id': 'AF-MinRate'},
+                    {'form_id': 'af_increment', 'value': 5, 'parse': lambda x: int(x),'id': 'AF-Increment'},
+                    {'form_id': 'af_multiplier', 'value': 5, 'parse': lambda x: int(x),'id': 'AF-Multiplier'},
+                    {'form_id': 'af_failedHTLCs', 'value': 25, 'parse': lambda x: int(x),'id': 'AF-FailedHTLCs'}, 
+                    {'form_id': 'af_updateHours', 'value': 24, 'parse': lambda x: int(x),'id': 'AF-UpdateHours'}, 
+                    #GUI
+                    {'form_id': 'gui_graphLinks', 'value': '0', 'parse': lambda x: x,'id': 'GUI-GraphLinks'}, 
+                    {'form_id': 'gui_netLinks', 'value': '0', 'parse': lambda x: x,'id': 'GUI-NetLinks'}, 
+                    #LND
+                    {'form_id': 'lnd_cleanPayments', 'value': '0', 'parse': lambda x: x, 'id': 'LND-CleanPayments'}, 
+                    {'form_id': 'lnd_retentionDays', 'value': '0', 'parse': lambda x: x, 'id': 'LND-RetentionDays'}, 
+                    ]
+
+        form = LocalSettingsForm(request.POST)
+        if not form.is_valid():
             messages.error(request, 'Invalid Request. Please try again.')
+        else:
+            update_channels = form.cleaned_data['update_channels']
+            for field in template:
+                value = form.cleaned_data[field['form_id']]
+                if value is not None:
+                    value = field['parse'](value)
+                    try:
+                        db_value = LocalSettings.objects.get(key=field['id'])
+                    except:
+                        LocalSettings(key=field['id'], value=field['value']).save()
+                        db_value = LocalSettings.objects.get(key=field['id'])
+                    if db_value.value == str(value) or len(str(value)) == 0:
+                        continue
+                    db_value.value = value
+                    db_value.save()
+
+                    if update_channels and field['id'] in ['AR-Target%', 'AR-Outbound%','AR-Inbound%','AR-MaxCost%']:
+                        if field['id'] == 'AR-Target%':
+                            Channels.objects.all().update(ar_amt_target=Round(F('capacity')*(value/100), output_field=IntegerField()))
+                        elif field['id'] == 'AR-Outbound%':
+                            Channels.objects.all().update(ar_out_target=value)
+                        elif field['id'] == 'AR-Inbound%':
+                            Channels.objects.all().update(ar_in_target=value)
+                        elif field['id'] == 'AR-MaxCost%':
+                            Channels.objects.all().update(ar_max_cost=value)
+                        messages.success(request, 'All channels ' + field['id'] + ' updated to: ' + str(value))
+                    else:
+                        messages.success(request, field['id'] + ' updated to: ' + str(value))
     return redirect(request.META.get('HTTP_REFERER'))
 
 @is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
@@ -2201,23 +2083,17 @@ def update_channel(request):
             chan_id = form.cleaned_data['chan_id']
             target = form.cleaned_data['target']
             update_target = int(form.cleaned_data['update_target'])
-            db_channel = Channels.objects.filter(chan_id=chan_id)[0]
+            db_channel = Channels.objects.get(chan_id=chan_id)
             if update_target == 0:
                 stub = lnrpc.LightningStub(lnd_connect())
-                channel_point = ln.ChannelPoint()
-                channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
-                channel_point.funding_txid_str = db_channel.funding_txid
-                channel_point.output_index = db_channel.output_index
+                channel_point = point(db_channel)
                 stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=target, fee_rate=(db_channel.local_fee_rate/1000000), time_lock_delta=db_channel.local_cltv))
                 db_channel.local_base_fee = target
                 db_channel.save()
                 messages.success(request, 'Base fee for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(target))
             elif update_target == 1:
                 stub = lnrpc.LightningStub(lnd_connect())
-                channel_point = ln.ChannelPoint()
-                channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
-                channel_point.funding_txid_str = db_channel.funding_txid
-                channel_point.output_index = db_channel.output_index
+                channel_point = point(db_channel)
                 stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=db_channel.local_base_fee, fee_rate=(target/1000000), time_lock_delta=db_channel.local_cltv))
                 old_fee_rate = db_channel.local_fee_rate
                 db_channel.local_fee_rate = target
@@ -2247,10 +2123,7 @@ def update_channel(request):
                 messages.success(request, 'Auto rebalancer max cost for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(target) + '%')
             elif update_target == 7:
                 stub = lnrouter.RouterStub(lnd_connect())
-                channel_point = ln.ChannelPoint()
-                channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
-                channel_point.funding_txid_str = db_channel.funding_txid
-                channel_point.output_index = db_channel.output_index
+                channel_point = point(db_channel)
                 stub.UpdateChanStatus(lnr.UpdateChanStatusRequest(chan_point=channel_point, action=0)) if target == 1 else stub.UpdateChanStatus(lnr.UpdateChanStatusRequest(chan_point=channel_point, action=1))
                 db_channel.local_disabled = False if target == 1 else True
                 db_channel.save()
@@ -2263,30 +2136,21 @@ def update_channel(request):
                 messages.success(request, 'Auto fees status for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(db_channel.auto_fees))
             elif update_target == 9:
                 stub = lnrpc.LightningStub(lnd_connect())
-                channel_point = ln.ChannelPoint()
-                channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
-                channel_point.funding_txid_str = db_channel.funding_txid
-                channel_point.output_index = db_channel.output_index
+                channel_point = point(db_channel)
                 stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=db_channel.local_base_fee, fee_rate=(db_channel.local_fee_rate/1000000), time_lock_delta=target))
                 db_channel.local_cltv = target
                 db_channel.save()
                 messages.success(request, 'CLTV for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(float(target)))
             elif update_target == 10:
                 stub = lnrpc.LightningStub(lnd_connect())
-                channel_point = ln.ChannelPoint()
-                channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
-                channel_point.funding_txid_str = db_channel.funding_txid
-                channel_point.output_index = db_channel.output_index
+                channel_point = point(db_channel)
                 stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=db_channel.local_base_fee, fee_rate=(db_channel.local_fee_rate/1000000), time_lock_delta=db_channel.local_cltv, min_htlc_msat_specified=True, min_htlc_msat=int(target*1000)))
                 db_channel.local_min_htlc_msat = int(target*1000)
                 db_channel.save()
                 messages.success(request, 'Min HTLC for channel ' + str(db_channel.alias) + ' (' + str(db_channel.chan_id) + ') updated to a value of: ' + str(float(target)))
             elif update_target == 11:
                 stub = lnrpc.LightningStub(lnd_connect())
-                channel_point = ln.ChannelPoint()
-                channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
-                channel_point.funding_txid_str = db_channel.funding_txid
-                channel_point.output_index = db_channel.output_index
+                channel_point = point(db_channel)
                 stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=db_channel.local_base_fee, fee_rate=(db_channel.local_fee_rate/1000000), time_lock_delta=db_channel.local_cltv, max_htlc_msat=int(target*1000)))
                 db_channel.local_max_htlc_msat = int(target*1000)
                 db_channel.save()
@@ -2354,6 +2218,13 @@ def update_pending(request):
             messages.error(request, 'Invalid Request. Please try again.')
     return redirect(request.META.get('HTTP_REFERER'))
 
+def point(ch: Channels):
+    channel_point = ln.ChannelPoint()
+    channel_point.funding_txid_bytes = bytes.fromhex(ch.funding_txid)
+    channel_point.funding_txid_str = ch.funding_txid
+    channel_point.output_index = ch.output_index
+    return channel_point
+
 @is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def update_setting(request):
     if request.method == 'POST':
@@ -2361,175 +2232,12 @@ def update_setting(request):
         if form.is_valid():
             key = form.cleaned_data['key']
             value = form.cleaned_data['value']
-            if key == 'AR-Target%':
-                target_percent = float(value)
-                try:
-                    db_percent_target = LocalSettings.objects.get(key='AR-Target%')
-                except:
-                    LocalSettings(key='AR-Target%', value='5').save()
-                    db_percent_target = LocalSettings.objects.get(key='AR-Target%')
-                db_percent_target.value = target_percent
-                db_percent_target.save()
-                messages.success(request, 'Updated auto rebalancer target amount to: ' + str(target_percent))
-            elif key == 'AR-Time':
-                target_time = int(value)
-                try:
-                    db_time_target = LocalSettings.objects.get(key='AR-Time')
-                except:
-                    LocalSettings(key='AR-Time', value='5').save()
-                    db_time_target = LocalSettings.objects.get(key='AR-Time')
-                db_time_target.value = target_time
-                db_time_target.save()
-                messages.success(request, 'Updated auto rebalancer target time setting to: ' + str(target_time))
-            elif key == 'AR-Workers':
-                workers = int(value)
-                try:
-                    db_workers = LocalSettings.objects.get(key='AR-Workers')
-                except:
-                    LocalSettings(key='AR-Workers', value='5').save()
-                    db_workers = LocalSettings.objects.get(key='AR-Workers')
-                db_workers.value = workers
-                db_workers.save()
-                messages.success(request, 'Updated auto rebalancer workers setting to: ' + str(workers))
-            elif key == 'AR-Enabled':
-                enabled = int(value)
-                try:
-                    db_enabled = LocalSettings.objects.get(key='AR-Enabled')
-                except:
-                    LocalSettings(key='AR-Enabled', value='0').save()
-                    db_enabled = LocalSettings.objects.get(key='AR-Enabled')
-                db_enabled.value = enabled
-                db_enabled.save()
-                messages.success(request, 'Updated auto rebalancer enabled setting to: ' + str(enabled))
-            elif key == 'AR-Outbound%':
-                outbound_percent = int(value)
-                try:
-                    db_outbound_target = LocalSettings.objects.get(key='AR-Outbound%')
-                except:
-                    LocalSettings(key='AR-Outbound%', value='75').save()
-                    db_outbound_target = LocalSettings.objects.get(key='AR-Outbound%')
-                db_outbound_target.value = outbound_percent
-                db_outbound_target.save()
-                messages.success(request, 'Updated auto rebalancer target outbound percent setting: ' + str(outbound_percent))
-            elif key == 'AR-Inbound%':
-                inbound_percent = int(value)
-                try:
-                    db_inbound_target = LocalSettings.objects.get(key='AR-Inbound%')
-                except:
-                    LocalSettings(key='AR-Inbound%', value='100').save()
-                    db_inbound_target = LocalSettings.objects.get(key='AR-Inbound%')
-                db_inbound_target.value = inbound_percent
-                db_inbound_target.save()
-                messages.success(request, 'Updated auto rebalancer target inbound percent setting: ' + str(inbound_percent))
-            elif key == 'AR-MaxFeeRate':
-                fee_rate = int(value)
-                try:
-                    db_fee_rate = LocalSettings.objects.get(key='AR-MaxFeeRate')
-                except:
-                    LocalSettings(key='AR-MaxFeeRate', value='100').save()
-                    db_fee_rate = LocalSettings.objects.get(key='AR-MaxFeeRate')
-                db_fee_rate.value = fee_rate
-                db_fee_rate.save()
-                messages.success(request, 'Updated auto rebalancer max fee rate setting to: ' + str(fee_rate))
-            elif key == 'AR-MaxCost%':
-                max_cost = int(value)
-                try:
-                    db_max_cost = LocalSettings.objects.get(key='AR-MaxCost%')
-                except:
-                    LocalSettings(key='AR-MaxCost%', value='65').save()
-                    db_max_cost = LocalSettings.objects.get(key='AR-MaxCost%')
-                db_max_cost.value = max_cost
-                db_max_cost.save()
-                messages.success(request, 'Updated auto rebalancer max cost setting to: ' + str(max_cost))
-            elif key == 'AR-Autopilot':
-                autopilot = int(value)
-                try:
-                    db_autopilot = LocalSettings.objects.get(key='AR-Autopilot')
-                except:
-                    LocalSettings(key='AR-Autopilot', value='0').save()
-                    db_autopilot = LocalSettings.objects.get(key='AR-Autopilot')
-                db_autopilot.value = autopilot
-                db_autopilot.save()
-                messages.success(request, 'Updated autopilot setting to: ' + str(autopilot))
-            elif key == 'AR-APDays':
-                apdays = int(value)
-                try:
-                    db_apdays = LocalSettings.objects.get(key='AR-APDays')
-                except:
-                    LocalSettings(key='AR-APDays', value='7').save()
-                    db_apdays = LocalSettings.objects.get(key='AR-APDays')
-                db_apdays.value = apdays
-                db_apdays.save()
-                messages.success(request, 'Updated Autopilot Days setting to: ' + str(apdays))
-            elif key == 'AR-Variance':
-                variance = int(value)
-                try:
-                    db_variance = LocalSettings.objects.get(key='AR-Variance')
-                except:
-                    LocalSettings(key='AR-Variance', value='0').save()
-                    db_variance = LocalSettings.objects.get(key='AR-Variance')
-                db_variance.value = variance
-                db_variance.save()
-                messages.success(request, 'Updated variance setting to: ' + str(variance))
-            elif key == 'AR-WaitPeriod':
-                wait_period = int(value)
-                try:
-                    db_wait_period = LocalSettings.objects.get(key='AR-WaitPeriod')
-                except:
-                    LocalSettings(key='AR-WaitPeriod', value='0').save()
-                    db_wait_period = LocalSettings.objects.get(key='AR-WaitPeriod')
-                db_wait_period.value = wait_period
-                db_wait_period.save()
-                messages.success(request, 'Updated wait period setting to: ' + str(wait_period))
-            elif key == 'GUI-GraphLinks':
-                links = str(value)
-                try:
-                    db_links = LocalSettings.objects.get(key='GUI-GraphLinks')
-                except:
-                    LocalSettings(key='GUI-GraphLinks', value='0').save()
-                    db_links = LocalSettings.objects.get(key='GUI-GraphLinks')
-                db_links.value = links
-                db_links.save()
-                messages.success(request, 'Updated graph links to use: ' + str(links))
-            elif key == 'GUI-NetLinks':
-                links = str(value)
-                try:
-                    db_links = LocalSettings.objects.get(key='GUI-NetLinks')
-                except:
-                    LocalSettings(key='GUI-NetLinks', value='0').save()
-                    db_links = LocalSettings.objects.get(key='GUI-NetLinks')
-                db_links.value = links
-                db_links.save()
-                messages.success(request, 'Updated network links to use: ' + str(links))
-            elif key == 'LND-CleanPayments':
-                clean_payments = int(value)
-                try:
-                    db_clean_payments = LocalSettings.objects.get(key='LND-CleanPayments')
-                except:
-                    LocalSettings(key='LND-CleanPayments', value='0').save()
-                    db_clean_payments = LocalSettings.objects.get(key='LND-CleanPayments')
-                db_clean_payments.value = clean_payments
-                db_clean_payments.save()
-                messages.success(request, 'Updated auto payment cleanup setting to: ' + str(clean_payments))
-            elif key == 'LND-RetentionDays':
-                retention_days = int(value)
-                try:
-                    db_retention_days = LocalSettings.objects.get(key='LND-RetentionDays')
-                except:
-                    LocalSettings(key='LND-RetentionDays', value='0').save()
-                    db_retention_days = LocalSettings.objects.get(key='LND-RetentionDays')
-                db_retention_days.value = retention_days
-                db_retention_days.save()
-                messages.success(request, 'Updated payment cleanup retention days to: ' + str(retention_days))
-            elif key == 'ALL-oRate':
+            if key == 'ALL-oRate':
                 target = int(value)
                 stub = lnrpc.LightningStub(lnd_connect())
                 channels = Channels.objects.filter(is_open=True)
                 for db_channel in channels:
-                    channel_point = ln.ChannelPoint()
-                    channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
-                    channel_point.funding_txid_str = db_channel.funding_txid
-                    channel_point.output_index = db_channel.output_index
+                    channel_point = point(db_channel)
                     stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=db_channel.local_base_fee, fee_rate=(target/1000000), time_lock_delta=db_channel.local_cltv))
                     old_fee_rate = db_channel.local_fee_rate
                     db_channel.local_fee_rate = target
@@ -2542,11 +2250,7 @@ def update_setting(request):
                 stub = lnrpc.LightningStub(lnd_connect())
                 channels = Channels.objects.filter(is_open=True)
                 for db_channel in channels:
-                    stub = lnrpc.LightningStub(lnd_connect())
-                    channel_point = ln.ChannelPoint()
-                    channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
-                    channel_point.funding_txid_str = db_channel.funding_txid
-                    channel_point.output_index = db_channel.output_index
+                    channel_point = point(db_channel)
                     stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=target, fee_rate=(db_channel.local_fee_rate/1000000), time_lock_delta=db_channel.local_cltv))
                     db_channel.local_base_fee = target
                     db_channel.save()
@@ -2556,11 +2260,7 @@ def update_setting(request):
                 stub = lnrpc.LightningStub(lnd_connect())
                 channels = Channels.objects.filter(is_open=True)
                 for db_channel in channels:
-                    stub = lnrpc.LightningStub(lnd_connect())
-                    channel_point = ln.ChannelPoint()
-                    channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
-                    channel_point.funding_txid_str = db_channel.funding_txid
-                    channel_point.output_index = db_channel.output_index
+                    channel_point = point(db_channel)
                     stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=db_channel.local_base_fee, fee_rate=(db_channel.local_fee_rate/1000000), time_lock_delta=target))
                     db_channel.local_cltv = target
                     db_channel.save()
@@ -2570,11 +2270,7 @@ def update_setting(request):
                 stub = lnrpc.LightningStub(lnd_connect())
                 channels = Channels.objects.filter(is_open=True)
                 for db_channel in channels:
-                    stub = lnrpc.LightningStub(lnd_connect())
-                    channel_point = ln.ChannelPoint()
-                    channel_point.funding_txid_bytes = bytes.fromhex(db_channel.funding_txid)
-                    channel_point.funding_txid_str = db_channel.funding_txid
-                    channel_point.output_index = db_channel.output_index
+                    channel_point = point(db_channel)
                     stub.UpdateChannelPolicy(ln.PolicyUpdateRequest(chan_point=channel_point, base_fee_msat=db_channel.local_base_fee, fee_rate=(db_channel.local_fee_rate/1000000), time_lock_delta=db_channel.local_cltv, min_htlc_msat_specified=True, min_htlc_msat=target))
                     db_channel.local_min_htlc_msat = target
                     db_channel.save()
@@ -2603,67 +2299,6 @@ def update_setting(request):
                 target = int(value)
                 channels = Channels.objects.filter(is_open=True, private=False).update(auto_fees=target)
                 messages.success(request, 'Auto Fees setting for all channels updated to a value of: ' + str(target))
-            elif key == 'AF-Enabled':
-                enabled = int(value)
-                try:
-                    db_enabled = LocalSettings.objects.get(key='AF-Enabled')
-                except:
-                    LocalSettings(key='AF-Enabled', value='0').save()
-                    db_enabled = LocalSettings.objects.get(key='AF-Enabled')
-                db_enabled.value = enabled
-                db_enabled.save()
-                messages.success(request, 'Updated autofees enabled setting to: ' + str(enabled))
-            elif key == 'AF-MaxRate':
-                enabled = int(value)
-                try:
-                    db_enabled = LocalSettings.objects.get(key='AF-MaxRate')
-                except:
-                    LocalSettings(key='AF-MaxRate', value='2500').save()
-                    db_enabled = LocalSettings.objects.get(key='AF-MaxRate')
-                db_enabled.value = enabled
-                db_enabled.save()
-                messages.success(request, 'Updated autofees max rate setting to: ' + str(enabled))
-            elif key == 'AF-MinRate':
-                enabled = int(value)
-                try:
-                    db_enabled = LocalSettings.objects.get(key='AF-MinRate')
-                except:
-                    LocalSettings(key='AF-MinRate', value='0').save()
-                    db_enabled = LocalSettings.objects.get(key='AF-MinRate')
-                db_enabled.value = enabled
-                db_enabled.save()
-                messages.success(request, 'Updated autofees min rate setting to: ' + str(enabled))
-            elif key == 'AF-Increment':
-                enabled = int(value)
-                try:
-                    db_enabled = LocalSettings.objects.get(key='AF-Increment')
-                except:
-                    LocalSettings(key='AF-Increment', value='5').save()
-                    db_enabled = LocalSettings.objects.get(key='AF-Increment')
-                db_enabled.value = enabled
-                db_enabled.save()
-                messages.success(request, 'Updated autofees fee increment setting to: ' + str(enabled))
-            elif key == 'AF-Multiplier':
-                enabled = int(value)
-                try:
-                    db_enabled = LocalSettings.objects.get(key='AF-Multiplier')
-                except:
-                    LocalSettings(key='AF-Multiplier', value='5').save()
-                    db_enabled = LocalSettings.objects.get(key='AF-Multiplier')
-                db_enabled.value = enabled
-                db_enabled.save()
-                messages.success(request, 'Updated autofees fee multiplier setting to: ' + str(enabled))
-            elif key == 'AF-FailedHTLCs':
-                enabled = int(value)
-                try:
-                    db_enabled = LocalSettings.objects.get(key='AF-FailedHTLCs')
-                except:
-                    LocalSettings(key='AF-FailedHTLCs', value='25').save()
-                    db_enabled = LocalSettings.objects.get(key='AF-FailedHTLCs')
-                db_enabled.value = enabled
-                db_enabled.save()
-                messages.success(request, 'Updated autofees daily failed HTLC trigger limit setting to: ' + str(enabled))
-            elif key == 'AF-UpdateHours':
                 enabled = int(value)
                 try:
                     db_enabled = LocalSettings.objects.get(key='AF-UpdateHours')
@@ -2756,10 +2391,23 @@ def get_fees(request):
                     return redirect(request.META.get('HTTP_REFERER'))
     return redirect(request.META.get('HTTP_REFERER'))
 
+@is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
+def sign_message(request):
+    if request.method == 'POST':
+        msg = request.POST.get("msg")
+        stub = lnrpc.LightningStub(lnd_connect())
+        req = ln.SignMessageRequest(msg=msg.encode('utf-8'), single_hash=False)
+        response = stub.SignMessage(req)
+        messages.success(request, "Signed message: " + str(response.signature))
+    else:
+        messages.error(request, 'Invalid Request. Please try again.')
+    return redirect(request.META.get('HTTP_REFERER'))
+
 class PaymentsViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Payments.objects.all()
     serializer_class = PaymentSerializer
+    filterset_fields = ['status']
 
 class PaymentHopsViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
@@ -2770,6 +2418,7 @@ class InvoicesViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Invoices.objects.all()
     serializer_class = InvoiceSerializer
+    filterset_fields = ['state']
 
     def update(self, request, pk=None):
         setting = get_object_or_404(Invoices.objects.all(), pk=pk)
@@ -2833,6 +2482,7 @@ class ChannelsViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Channels.objects.all()
     serializer_class = ChannelSerializer
+    filterset_fields = ['is_open', 'private', 'is_active', 'auto_rebalance']
 
     def update(self, request, pk=None):
         channel = get_object_or_404(Channels.objects.all(), pk=pk)
@@ -2840,21 +2490,27 @@ class ChannelsViewSet(viewsets.ReadOnlyModelViewSet):
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data)
-        else:
-            return Response(serializer.errors)
+        return Response(serializer.errors)
 
 class RebalancerViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
-    queryset = Rebalancer.objects.all()
+    queryset = Rebalancer.objects.all().order_by('-id')
     serializer_class = RebalancerSerializer
-
+    filterset_fields = {'status':['lt','gt','exact'], 'payment_hash':['exact'], 'stop':['gt']}
     def create(self, request):
-        serializer = RebalancerSerializer(data=request.data)
+        serializer = self.get_serializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data)
-        else:
-            return Response(serializer.errors)
+        return Response(serializer.errors)
+    def update(self, request, pk):
+        rebalance = get_object_or_404(Rebalancer.objects.all(), pk=pk)
+        serializer = RebalancerSerializer(rebalance, data=request.data, context={'request': request}, partial=True)
+        if serializer.is_valid():
+            rebalance.stop = datetime.now()
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors)
 
 @api_view(['POST'])
 @is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
@@ -3170,3 +2826,28 @@ def pending_channels(request):
         debug_error_index = error.find('debug_error_string =') - 3
         error_msg = error[details_index:debug_error_index]
         return Response({'error': 'Failed to get pending channels! Error: ' + error_msg})
+
+@api_view(['POST'])
+@is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
+def bump_fee(request):
+    serializer = BumpFeeSerializer(data=request.data)
+    if serializer.is_valid():
+        txid = serializer.validated_data['txid']
+        index = serializer.validated_data['index']
+        target_fee = serializer.validated_data['target_fee']
+        force = serializer.validated_data['force']
+        try:
+            target_outpoint = ln.OutPoint()
+            target_outpoint.txid_str = txid
+            target_outpoint.output_index = index
+            stub = walletstub.WalletKitStub(lnd_connect())
+            stub.BumpFee(walletrpc.BumpFeeRequest(outpoint=target_outpoint, sat_per_vbyte=target_fee, force=force))
+            return Response({'message': f'Fee bumped to {target_fee} sats/vbyte for outpoint: {txid}:{index}'})
+        except Exception as e:
+            error = str(e)
+            details_index = error.find('details =') + 11
+            debug_error_index = error.find('debug_error_string =') - 3
+            error_msg = error[details_index:debug_error_index]
+            return Response({'error': f'Fee bump failed! Error: {error_msg}'})
+    else:
+        return Response({'error': 'Invalid request!'})

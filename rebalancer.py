@@ -8,6 +8,8 @@ from gui.lnd_deps import router_pb2 as lnr
 from gui.lnd_deps import router_pb2_grpc as lnrouter
 from gui.lnd_deps.lnd_connect import lnd_connect, async_lnd_connect
 from os import environ
+from typing import List
+
 environ['DJANGO_SETTINGS_MODULE'] = 'lndg.settings'
 django.setup()
 from gui.models import Rebalancer, Channels, LocalSettings, Forwards, Autopilot
@@ -182,7 +184,7 @@ def update_channels(stub, incoming_channel, outgoing_channel):
         print (f"{datetime.now().strftime('%c')} : Error updating channel balances: {str(e)=}")
 
 @sync_to_async
-def auto_schedule():
+def auto_schedule() -> List[Rebalancer]:
     try:
         #No rebalancer jobs have been scheduled, lets look for any channels with an auto_rebalance flag and make the best request if we find one
         if LocalSettings.objects.filter(key='AR-Enabled').exists():
