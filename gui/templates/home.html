@@ -28,10 +28,13 @@
       document.getElementById('qrcode').style.display = 'none'
     }
   </script>
-  <h3><a href="{{ graph_links }}/{{ network }}node/{{ node_info.identity_pubkey }}" target="_blank">{{ node_info.alias }}</a> | {{ node_info.identity_pubkey }}</h3>
+    <h3>
+      <span style="font-size: 12px;vertical-align: middle; padding-left: 18px; border:1px solid {{ node_info.color }}; background-color: {{ node_info.color }}" class="w3-circle" title="{{ node_info.color }}"></span>
+      <a style="margin-left:6px;" href="{{ graph_links }}/{{ network }}node/{{ node_info.identity_pubkey }}" target="_blank">{{ node_info.alias }}</a> | {{ node_info.identity_pubkey }}
+    </h3>
   <h6>
-    <span class="w3-tag w3-round w3-{% if node_info.synced_to_graph %}green{% else %}red{% endif %}" title="{% if not node_info.synced_to_graph %}Not {% endif %}Synced">LND</span>
-    <span style="padding:1.5px 8px;" class="w3-round w3-border w3-border-{% if node_info.synced_to_chain %}green{% else %}red{% endif %}" title="{% if not node_info.synced_to_chain %}Not {% endif %}Synced">{% for info in node_info.chains %}{{ info }}{% endfor %} | {{ node_info.block_height }} #{{ node_info.block_hash }}</span>
+    <span class="w3-tag w3-round w3-{% if node_info.synced_to_graph %}green{% else %}red{% endif %}" title="{{ node_info.version }}">LND</span>
+    <span style="padding:1.5px 8px;" class="w3-round w3-border w3-border-{% if node_info.synced_to_chain %}green{% else %}red{% endif %}" title="Chain {% if not node_info.synced_to_chain %}Not {% endif %}Synced">{% for info in node_info.chains %}{{ info }}{% endfor %} | {{ node_info.block_height }} #{{ node_info.block_hash }}</span>
   </h6>
   <h6>
     <span style="padding:1.5px 8px;" class="w3-round w3-border w3-border-grey">Public Capacity: {{ total_capacity|intcomma }}</span>
@@ -61,7 +64,7 @@
         <path style="fill:#3fb950;stroke:#3fb950;" fill-rule="evenodd" d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z"></path>
       </svg>
     </a>
-    <div style="display: none; position: absolute; top: 30px; right: 30px; padding: 30px; background: white" id="qrcode"></div>
+    <div style="display:none;position:absolute;top:30px;right:30px;padding:30px;z-index:11;background:white" id="qrcode"></div>
   </div>
   {% endfor %}
 </div>
@@ -113,7 +116,7 @@
       <th>Period</th>
       <th>Routed</th>
       <th>Fees earned | paid</th>
-      <th>Offchain fees</th>
+      <th>Onchain fees</th>
       <th>Cost (%)</th>
       <th title="Profit made per outbound [profit per outbound including onchain fees]">Profit/Outbound</th>
       <th>Outbound Utilization</th>
