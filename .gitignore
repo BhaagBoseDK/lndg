@@ -9,3 +9,6 @@ node_modules
 lndg-admin.txt
 .vscode
 cp_lndg.sh
+.vs
+gui/static/admin
+gui/static/rest_framework

@@ -335,6 +335,7 @@ def update_channels(stub):
         if old_fee_rate is not None and old_fee_rate != local_policy.fee_rate_milli_msat:
             print(f"{datetime.now().strftime('%c')} : Ext Fee Change Detected {db_channel.chan_id=} {db_channel.alias=} {old_fee_rate=} {db_channel.local_fee_rate=}")
             #External Fee change detected, update auto fee log
+            db_channel.fees_updated = datetime.now()
             Autofees(chan_id=db_channel.chan_id, peer_alias=db_channel.alias, setting=(f"Ext"), old_value=old_fee_rate, new_value=db_channel.local_fee_rate).save()
         db_channel.save()
         counter += 1
@@ -567,10 +568,8 @@ def auto_fees(stub):
                     failed_htlc_df = failed_htlc_df[(failed_htlc_df['wire_failure']==15) & (failed_htlc_df['failure_detail']==6) & (failed_htlc_df['amount']>failed_htlc_df['chan_out_liq']+failed_htlc_df['chan_out_pending'])]
                 forwards = Forwards.objects.filter(forward_date__gte=filter_7day, amt_out_msat__gte=1000000)
                 forwards_df_7d = DataFrame.from_records(forwards.values())
-                forwards_df_in_7d_sum = DataFrame() if forwards_df_7d.empty else forwards_df_7d.groupby('chan_id_in', as_index=True).sum()
-                forwards_df_out_7d_sum = DataFrame() if forwards_df_7d.empty else forwards_df_7d.groupby('chan_id_out', as_index=True).sum()
-                #print (f"{datetime.now().strftime('%c')} : {forwards_df_in_7d_sum=}")
-                #print (f"{datetime.now().strftime('%c')} : {forwards_df_out_7d_sum=}")
+                forwards_df_in_7d_sum = DataFrame() if forwards_df_7d.empty else forwards_df_7d.groupby('chan_id_in', as_index=True).sum(numeric_only=True)
+                forwards_df_out_7d_sum = DataFrame() if forwards_df_7d.empty else forwards_df_7d.groupby('chan_id_out', as_index=True).sum(numeric_only=True)
                 channels_df['local_balance'] = channels_df.apply(lambda row: row.local_balance + row.pending_outbound, axis=1)
                 channels_df['remote_balance'] = channels_df.apply(lambda row: row.remote_balance + row.pending_inbound, axis=1)
                 channels_df['in_percent'] = channels_df.apply(lambda row: int(round((row['remote_balance']/row['capacity'])*100, 0)), axis=1)
@@ -586,7 +585,7 @@ def auto_fees(stub):
                 invoices = Invoices.objects.filter(state=1).filter(settle_date__gte=filter_7day).filter(value__gte=1000).filter(r_hash__in=payments.values_list('payment_hash'))
                 payments_df_7d = DataFrame.from_records(payments.filter(creation_date__gte=filter_7day).values())
                 invoices_df_7d = DataFrame.from_records(invoices.filter(settle_date__gte=filter_7day).values())
-                invoices_df_7d_sum = DataFrame() if invoices_df_7d.empty else invoices_df_7d.groupby('chan_in', as_index=True).sum()
+                invoices_df_7d_sum = DataFrame() if invoices_df_7d.empty else invoices_df_7d.groupby('chan_in', as_index=True).sum(numeric_only=True)
                 invoice_hashes_7d = DataFrame() if invoices_df_7d.empty else invoices_df_7d.groupby('chan_in', as_index=True)['r_hash'].apply(list)
                 channels_df['amt_rebal_in_7day'] = channels_df.apply(lambda row: int(invoices_df_7d_sum.loc[row.chan_id].amt_paid) if invoices_df_7d_sum.empty == False and (invoices_df_7d_sum.index == row.chan_id).any() else 0, axis=1)
                 channels_df['costs_7day'] = channels_df.apply(lambda row: 0 if row['amt_rebal_in_7day'] == 0 else int(payments_df_7d.set_index('payment_hash', inplace=False).loc[invoice_hashes_7d[row.chan_id] if invoice_hashes_7d.empty == False and (invoice_hashes_7d.index == row.chan_id).any() else []]['fee'].sum()), axis=1)
