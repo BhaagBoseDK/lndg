@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from rest_framework.relations import PrimaryKeyRelatedField
-from .models import LocalSettings, Payments, PaymentHops, Invoices, Forwards, Channels, Rebalancer, Peers, Onchain, PendingHTLCs, FailedHTLCs, Closures, Resolutions
+from .models import LocalSettings, Payments, PaymentHops, Invoices, Forwards, Channels, Rebalancer, Peers, Onchain, PendingHTLCs, FailedHTLCs, Closures, Resolutions, PeerEvents
 
 ##FUTURE UPDATE 'exclude' TO 'fields'
 
@@ -71,6 +71,8 @@ class ChannelSerializer(serializers.HyperlinkedModelSerializer):
     remote_max_htlc_msat = serializers.ReadOnlyField()
     alias = serializers.ReadOnlyField()
     fees_updated = serializers.ReadOnlyField()
+    push_amt = serializers.ReadOnlyField()
+    close_address = serializers.ReadOnlyField()
     opened_in = serializers.SerializerMethodField()
     ar_max_cost = serializers.IntegerField(required=False)
     ar_amt_target = serializers.IntegerField(required=False)
@@ -176,6 +178,17 @@ class PendingHTLCSerializer(serializers.HyperlinkedModelSerializer):
     class Meta:
         model = PendingHTLCs
         exclude = []
+
+class PeerEventsSerializer(serializers.HyperlinkedModelSerializer):
+    id = serializers.ReadOnlyField()
+    out_liq_percent = serializers.SerializerMethodField()
+    class Meta:
+        model = PeerEvents
+        exclude = []
+
+    def get_out_liq_percent(self, obj):
+        capacity = Channels.objects.filter(chan_id=obj.chan_id).get().capacity
+        return int(round((obj.out_liq/capacity)*100, 1))
 
 class FailedHTLCSerializer(serializers.HyperlinkedModelSerializer):
     id = serializers.ReadOnlyField()

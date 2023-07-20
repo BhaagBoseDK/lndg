@@ -1,9 +1,9 @@
 from django.contrib import messages
-from django.db import connection
 from django.shortcuts import get_object_or_404, render, redirect
-from django.db.models import Sum, IntegerField, Count, Max, F, Q, Case, When
-from django.db.models.functions import Round
+from django.db.models import Sum, IntegerField, Count, Max, F, Q, Case, When, Value, FloatField
+from django.db.models.functions import Round, TruncDay
 from django.contrib.auth.decorators import login_required
+from django_filters import FilterSet, CharFilter, DateTimeFilter, NumberFilter
 from datetime import datetime, timedelta
 from rest_framework import viewsets
 from rest_framework.response import Response
@@ -11,7 +11,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from .forms import OpenChannelForm, CloseChannelForm, ConnectPeerForm, AddInvoiceForm, RebalancerForm, UpdateChannel, UpdateSetting, LocalSettingsForm, AddTowerForm, RemoveTowerForm, DeleteTowerForm, BatchOpenForm, UpdatePending, UpdateClosing, UpdateKeysend, AddAvoid, RemoveAvoid
 from .models import Payments, PaymentHops, Invoices, Forwards, Channels, Rebalancer, LocalSettings, Peers, Onchain, Closures, Resolutions, PendingHTLCs, FailedHTLCs, Autopilot, Autofees, PendingChannels, AvoidNodes, PeerEvents
-from .serializers import ConnectPeerSerializer, FailedHTLCSerializer, LocalSettingsSerializer, OpenChannelSerializer, CloseChannelSerializer, AddInvoiceSerializer, PaymentHopsSerializer, PaymentSerializer, InvoiceSerializer, ForwardSerializer, ChannelSerializer, PendingHTLCSerializer, RebalancerSerializer, UpdateAliasSerializer, PeerSerializer, OnchainSerializer, ClosuresSerializer, ResolutionsSerializer, BumpFeeSerializer, UpdateChanPolicy, NewAddressSerializer, BroadcastTXSerializer
+from .serializers import ConnectPeerSerializer, FailedHTLCSerializer, LocalSettingsSerializer, OpenChannelSerializer, CloseChannelSerializer, AddInvoiceSerializer, PaymentHopsSerializer, PaymentSerializer, InvoiceSerializer, ForwardSerializer, ChannelSerializer, PendingHTLCSerializer, RebalancerSerializer, UpdateAliasSerializer, PeerSerializer, OnchainSerializer, ClosuresSerializer, ResolutionsSerializer, BumpFeeSerializer, UpdateChanPolicy, NewAddressSerializer, BroadcastTXSerializer, PeerEventsSerializer
 from gui.lnd_deps import lightning_pb2 as ln
 from gui.lnd_deps import lightning_pb2_grpc as lnrpc
 from gui.lnd_deps import router_pb2 as lnr
@@ -25,6 +25,7 @@ from lndg import settings
 from os import path
 from pandas import DataFrame, merge
 from requests import get
+from . import af
 
 def graph_links():
     if LocalSettings.objects.filter(key='GUI-GraphLinks').exists():
@@ -279,92 +280,10 @@ def channels(request):
 @is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def fees(request):
     if request.method == 'GET':
-        filter_1day = datetime.now() - timedelta(days=1)
-        filter_7day = datetime.now() - timedelta(days=7)
         channels = Channels.objects.filter(is_open=True, private=False)
-        channels_df = DataFrame.from_records(channels.values())
-        if channels_df.shape[0] > 0:
-            if LocalSettings.objects.filter(key='AF-MaxRate').exists():
-                max_rate = int(LocalSettings.objects.filter(key='AF-MaxRate')[0].value)
-            else:
-                LocalSettings(key='AF-MaxRate', value='2500').save()
-                max_rate = 2500
-            if LocalSettings.objects.filter(key='AF-MinRate').exists():
-                min_rate = int(LocalSettings.objects.filter(key='AF-MinRate')[0].value)
-            else:
-                LocalSettings(key='AF-MinRate', value='0').save()
-                min_rate = 0
-            if LocalSettings.objects.filter(key='AF-Increment').exists():
-                increment = int(LocalSettings.objects.filter(key='AF-Increment')[0].value)
-            else:
-                LocalSettings(key='AF-Increment', value='5').save()
-                increment = 5
-            if LocalSettings.objects.filter(key='AF-Multiplier').exists():
-                multiplier = int(LocalSettings.objects.filter(key='AF-Multiplier')[0].value)
-            else:
-                LocalSettings(key='AF-Multiplier', value='5').save()
-                multiplier = 5
-            if LocalSettings.objects.filter(key='AF-FailedHTLCs').exists():
-                failed_htlc_limit = int(LocalSettings.objects.filter(key='AF-FailedHTLCs')[0].value)
-            else:
-                LocalSettings(key='AF-FailedHTLCs', value='25').save()
-                failed_htlc_limit = 25
-            if LocalSettings.objects.filter(key='AF-UpdateHours').exists():
-                update_hours = int(LocalSettings.objects.filter(key='AF-UpdateHours')[0].value)
-            else:
-                LocalSettings(key='AF-UpdateHours', value='24').save()
-                update_hours = 24
-            failed_htlc_df = DataFrame.from_records(FailedHTLCs.objects.exclude(wire_failure=99).filter(timestamp__gte=filter_1day).order_by('-id').values())
-            if failed_htlc_df.shape[0] > 0:
-                failed_htlc_df = failed_htlc_df[(failed_htlc_df['wire_failure']==15) & (failed_htlc_df['failure_detail']==6) & (failed_htlc_df['amount']>failed_htlc_df['chan_out_liq']+failed_htlc_df['chan_out_pending'])]
-            forwards = Forwards.objects.filter(forward_date__gte=filter_7day, amt_out_msat__gte=1000000)
-            forwards_df_7d = DataFrame.from_records(forwards.values())
-            forwards_df_in_7d_sum = DataFrame() if forwards_df_7d.empty else forwards_df_7d.groupby('chan_id_in', as_index=True).sum(numeric_only=True)
-            forwards_df_out_7d_sum = DataFrame() if forwards_df_7d.empty else forwards_df_7d.groupby('chan_id_out', as_index=True).sum(numeric_only=True)
-            channels_df['local_balance'] = channels_df.apply(lambda row: row.local_balance + row.pending_outbound, axis=1)
-            channels_df['remote_balance'] = channels_df.apply(lambda row: row.remote_balance + row.pending_inbound, axis=1)
-            channels_df['in_percent'] = channels_df.apply(lambda row: int(round((row['remote_balance']/row['capacity'])*100, 0)), axis=1)
-            channels_df['out_percent'] = channels_df.apply(lambda row: int(round((row['local_balance']/row['capacity'])*100, 0)), axis=1)
-            channels_df['amt_routed_in_7day'] = channels_df.apply(lambda row: int(forwards_df_in_7d_sum.loc[row.chan_id].amt_out_msat/1000) if (forwards_df_in_7d_sum.index == row.chan_id).any() else 0, axis=1)
-            channels_df['amt_routed_out_7day'] = channels_df.apply(lambda row: int(forwards_df_out_7d_sum.loc[row.chan_id].amt_out_msat/1000) if (forwards_df_out_7d_sum.index == row.chan_id).any() else 0, axis=1)
-            channels_df['net_routed_7day'] = channels_df.apply(lambda row: round((row['amt_routed_out_7day']-row['amt_routed_in_7day'])/row['capacity'], 1), axis=1)
-            channels_df['revenue_7day'] = channels_df.apply(lambda row: int(forwards_df_out_7d_sum.loc[row.chan_id].fee) if forwards_df_out_7d_sum.empty == False and (forwards_df_out_7d_sum.index == row.chan_id).any() else 0, axis=1)
-            channels_df['revenue_assist_7day'] = channels_df.apply(lambda row: int(forwards_df_in_7d_sum.loc[row.chan_id].fee) if forwards_df_in_7d_sum.empty == False and (forwards_df_in_7d_sum.index == row.chan_id).any() else 0, axis=1)
-            channels_df['out_rate'] = channels_df.apply(lambda row: int((row['revenue_7day']/row['amt_routed_out_7day'])*1000000) if row['amt_routed_out_7day'] > 0 else 0, axis=1)
-            channels_df['failed_out_1day'] = 0 if failed_htlc_df.empty else channels_df.apply(lambda row: len(failed_htlc_df[failed_htlc_df['chan_id_out']==row.chan_id]), axis=1)
-            payments = Payments.objects.filter(status=2).filter(creation_date__gte=filter_7day).filter(rebal_chan__isnull=False)
-            invoices = Invoices.objects.filter(state=1).filter(settle_date__gte=filter_7day).filter(r_hash__in=payments.values_list('payment_hash'))
-            payments_df_7d = DataFrame.from_records(payments.filter(creation_date__gte=filter_7day).values())
-            invoices_df_7d = DataFrame.from_records(invoices.filter(settle_date__gte=filter_7day).values())
-            invoices_df_7d_sum = DataFrame() if invoices_df_7d.empty else invoices_df_7d.groupby('chan_in', as_index=True).sum(numeric_only=True)
-            invoice_hashes_7d = DataFrame() if invoices_df_7d.empty else invoices_df_7d.groupby('chan_in', as_index=True)['r_hash'].apply(list)
-            channels_df['amt_rebal_in_7day'] = channels_df.apply(lambda row: int(invoices_df_7d_sum.loc[row.chan_id].amt_paid) if invoices_df_7d_sum.empty == False and (invoices_df_7d_sum.index == row.chan_id).any() else 0, axis=1)
-            channels_df['costs_7day'] = channels_df.apply(lambda row: 0 if row['amt_rebal_in_7day'] == 0 else int(payments_df_7d.set_index('payment_hash', inplace=False).loc[invoice_hashes_7d[row.chan_id] if invoice_hashes_7d.empty == False and (invoice_hashes_7d.index == row.chan_id).any() else []]['fee'].sum()), axis=1)
-            channels_df['rebal_ppm'] = channels_df.apply(lambda row: int((row['costs_7day']/row['amt_rebal_in_7day'])*1000000) if row['amt_rebal_in_7day'] > 0 else 0, axis=1)
-            channels_df['profit_margin'] = channels_df.apply(lambda row: row['out_rate']*((100-row['ar_max_cost'])/100), axis=1)
-            channels_df['max_suggestion'] = channels_df.apply(lambda row: int((row['out_rate']+row['profit_margin'] if row['out_rate'] > 0 else row['local_fee_rate'])*1.15) if row['in_percent'] > 25 else int(row['local_fee_rate']), axis=1)
-            channels_df['max_suggestion'] = channels_df.apply(lambda row: row['local_fee_rate']+25 if row['max_suggestion'] > (row['local_fee_rate']+25) or row['max_suggestion'] == 0 else row['max_suggestion'], axis=1)
-            channels_df['min_suggestion'] = channels_df.apply(lambda row: int((row['rebal_ppm'] if row['out_rate'] > 0 else row['local_fee_rate'])*0.75) if row['out_percent'] > 25 else int(row['local_fee_rate']), axis=1)
-            channels_df['min_suggestion'] = channels_df.apply(lambda row: row['local_fee_rate']-50 if row['min_suggestion'] < (row['local_fee_rate']-50) else row['min_suggestion'], axis=1)
-            channels_df['assisted_ratio'] = channels_df.apply(lambda row: round((row['revenue_assist_7day'] if row['revenue_7day'] == 0 else row['revenue_assist_7day']/row['revenue_7day']), 2), axis=1)
-            channels_df['adjusted_out_rate'] = channels_df.apply(lambda row: int(row['out_rate']+row['net_routed_7day']*row['assisted_ratio']*multiplier), axis=1)
-            channels_df['adjusted_rebal_rate'] = channels_df.apply(lambda row: int(row['rebal_ppm']+row['profit_margin']), axis=1)
-            channels_df['out_rate_only'] = channels_df.apply(lambda row: int(row['out_rate']+row['net_routed_7day']*row['out_rate']*(multiplier/100)), axis=1)
-            channels_df['fee_rate_only'] = channels_df.apply(lambda row: int(row['local_fee_rate']+row['net_routed_7day']*row['local_fee_rate']*(multiplier/100)), axis=1)
-            channels_df['new_rate'] = channels_df.apply(lambda row: row['adjusted_out_rate'] if row['net_routed_7day'] != 0 else (row['adjusted_rebal_rate'] if row['rebal_ppm'] > 0 and row['out_rate'] > 0 else (row['out_rate_only'] if row['out_rate'] > 0 else (row['min_suggestion'] if row['net_routed_7day'] == 0 and row['in_percent'] < 25 else row['fee_rate_only']))), axis=1)
-            channels_df['new_rate'] = channels_df.apply(lambda row: 0 if row['new_rate'] < 0 else row['new_rate'], axis=1)
-            channels_df['adjustment'] = channels_df.apply(lambda row: int(row['new_rate']-row['local_fee_rate']), axis=1)
-            channels_df['new_rate'] = channels_df.apply(lambda row: row['local_fee_rate']-10 if row['adjustment']==0 and row['out_percent']>=25 and row['net_routed_7day']==0 else row['new_rate'], axis=1)
-            channels_df['new_rate'] = channels_df.apply(lambda row: row['local_fee_rate']+25 if row['adjustment']==0 and row['out_percent']<25 and row['failed_out_1day']>failed_htlc_limit else row['new_rate'], axis=1)
-            channels_df['new_rate'] = channels_df.apply(lambda row: row['max_suggestion'] if row['new_rate'] > row['max_suggestion'] else row['new_rate'], axis=1)
-            channels_df['new_rate'] = channels_df.apply(lambda row: row['min_suggestion'] if row['new_rate'] < row['min_suggestion'] else row['new_rate'], axis=1)
-            channels_df['new_rate'] = channels_df.apply(lambda row: int(round(row['new_rate']/increment, 0)*increment), axis=1)
-            channels_df['new_rate'] = channels_df.apply(lambda row: max_rate if max_rate < row['new_rate'] else row['new_rate'], axis=1)
-            channels_df['new_rate'] = channels_df.apply(lambda row: min_rate if min_rate > row['new_rate'] else row['new_rate'], axis=1)
-            channels_df['adjustment'] = channels_df.apply(lambda row: int(row['new_rate']-row['local_fee_rate']), axis=1)
-            channels_df['eligible'] = channels_df.apply(lambda row: (datetime.now()-row['fees_updated']).total_seconds() > (update_hours*3600), axis=1)
+        results_df = af.main(channels)
         context = {
-            'channels': [] if channels_df.empty else channels_df.sort_values(by=['out_percent']).to_dict(orient='records'),
+            'channels': [] if results_df.empty else results_df.sort_values(by=['out_percent']).to_dict(orient='records'),
             'local_settings': get_local_settings('AF-'),
             'network': 'testnet/' if settings.LND_NETWORK == 'testnet' else '',
             'graph_links': graph_links(),
@@ -829,80 +748,16 @@ def income(request):
     else:
         return redirect('home')
 
-def dictfetchall(cursor):
-    """
-    Return all rows from a cursor as a dict.
-    Assume the column names are unique.
-    """
-    columns = [col[0] for col in cursor.description]
-    return [dict(zip(columns, row)) for row in cursor.fetchall()]
-
 @api_view(['GET'])
 @is_login_required(permission_classes([IsAuthenticated]), settings.LOGIN_REQUIRED)
 def chart(request):
-    with connection.cursor() as cursor:
-        cursor.execute("""with payments as (
-select strftime('%Y-%m-%d %H:00:00',creation_date) dt, fee cost, -(value + fee) offchain, 0 onchain, -(value + fee) total from gui_payments where status = 2
-),
-invoices as (
-select strftime('%Y-%m-%d %H:00:00',settle_date) dt, 0 cost, amt_paid offchain, 0 onchain, amt_paid total from gui_invoices where state = 1
-),
-forwards as (
-select strftime('%Y-%m-%d %H:00:00',forward_date) dt, 0 cost, fee offchain, 0 onchain, fee total from gui_forwards
-),
-closes as (
-select strftime('%Y-%m-%d %H:00:00',oc.time_stamp) dt, cl.closing_costs cost, -cl.settled_balance offchain, cl.settled_balance onchain, -cl.closing_costs total from gui_closures cl
-join gui_onchain oc on cl.closing_tx = oc.tx_hash
-),
-FCloses as (
-select strftime('%Y-%m-%d %H:00:00',oc.time_stamp) dt, cl.closing_costs cost, -cl.settled_balance offchain, cl.settled_balance onchain, -cl.closing_costs total from gui_resolutions rs
-join gui_onchain oc on rs.sweep_txid = oc.tx_hash
-left join gui_closures cl on cl.chan_id = rs.chan_id
-group by rs.chan_id
-),
-closures as (
-select * from closes
-   UNION ALL
-select * from FCloses
-),
-onchain as (
-select strftime('%Y-%m-%d %H:00:00',oc.time_stamp) dt, oc.fee cost, 0 offchain, oc.amount onchain, oc.amount total from gui_onchain oc
-where oc.tx_hash not in (
- select funding_txid from gui_closures
- 	UNION
- select closing_tx from gui_closures
- 	UNION
- select funding_txid from gui_channels
-    UNION
- select sweep_txid from gui_resolutions
- )
-),
-opens as (
-select strftime('%Y-%m-%d %H:00:00',oc.time_stamp) dt, oc.fee cost, -oc.amount-oc.fee-COALESCE(SUM(gc.local_commit),0) offchain, oc.amount onchain, -oc.fee-COALESCE(SUM(gc.local_commit),0) total from gui_onchain oc
-left join gui_closures cl on oc.tx_hash = cl.funding_txid
-left join gui_channels gc on oc.tx_hash = gc.funding_txid
-WHERE oc.fee > 0 and cl.funding_txid is not null or gc.funding_txid is not null
-group by oc.tx_hash
-),
-balance as (
-select * from payments
- UNION ALL 
-select * from invoices
- UNION ALL
-select * from forwards
- UNION ALL
-select * from opens
- UNION ALL
-select * from closures
- UNION ALL
-select * from onchain
-)
-select dt, sum(cost) cost, sum(offchain) offchain, sum(onchain) onchain, sum(total) total from balance
-group by dt
-order by dt
-""")
-        results = dictfetchall(cursor)
-        return Response(results)
+    payments = Payments.objects.filter(status=2).annotate(dt=TruncDay('creation_date')).values('dt').annotate(cost=Sum('fee', output_field=FloatField()), revenue=Value(0, output_field=FloatField()), onchain=Value(0))
+    invoices = Invoices.objects.filter(state=1, is_revenue=True).annotate(dt=TruncDay('settle_date')).values('dt').annotate(cost=Value(0, output_field=FloatField()), revenue=Sum('amt_paid', output_field=FloatField()), onchain=Value(0))
+    forwards = Forwards.objects.annotate(dt=TruncDay('forward_date')).values('dt').annotate(cost=Value(0, output_field=FloatField()), revenue=Sum('fee', output_field=FloatField()), onchain=Value(0))
+    onchain = Onchain.objects.annotate(dt=TruncDay('time_stamp')).values('dt').annotate(cost=Value(0, output_field=FloatField()), revenue=Value(0, output_field=FloatField()), onchain=Sum('amount'))
+    balance = DataFrame.from_records(payments.union(invoices, forwards, onchain).values('dt', 'cost', 'onchain', 'revenue'))
+    results = balance.groupby('dt').sum().reset_index().sort_values('dt')
+    return Response(results.to_dict(orient='records'))
 
 @is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def channel(request):
@@ -923,15 +778,16 @@ def channel(request):
             else:
                 node_outbound = channels_df['local_balance'].sum()
                 node_capacity = channels_df['capacity'].sum()
-            channels_df = DataFrame.from_records(Channels.objects.filter(chan_id=chan_id).values())
+            channel = Channels.objects.filter(chan_id=chan_id)
+            channels_df = DataFrame.from_records(channel.values())
             rebalancer_df = DataFrame.from_records(Rebalancer.objects.filter(last_hop_pubkey=channels_df['remote_pubkey'][0]).annotate(ppm=Round((Sum('fee_limit')*1000000)/Sum('value'), output_field=IntegerField())).order_by('-id').values())
             failed_htlc_df = DataFrame.from_records(FailedHTLCs.objects.exclude(wire_failure=99).filter(Q(chan_id_in=chan_id) | Q(chan_id_out=chan_id)).order_by('-id').values())
             peer_info_df = DataFrame.from_records(Peers.objects.filter(pubkey=channels_df['remote_pubkey'][0]).values())
             channels_df['local_balance'] = channels_df['local_balance'] + channels_df['pending_outbound']
             channels_df['remote_balance'] = channels_df['remote_balance'] + channels_df['pending_inbound']
-            channels_df['in_percent'] = int(round((channels_df['remote_balance']/channels_df['capacity'])*100, 0))
-            channels_df['out_percent'] = int(round((channels_df['local_balance']/channels_df['capacity'])*100, 0))
-            channels_df['open_block'] = int(channels_df.chan_id)>>40
+            channels_df['in_percent'] = ((channels_df['remote_balance']/channels_df['capacity'])*100).round(0).astype(int)
+            channels_df['out_percent'] = ((channels_df['local_balance']/channels_df['capacity'])*100).round(0).astype(int)
+            channels_df['open_block'] = channels_df['chan_id'].apply(lambda row: int(row)>>40).astype(int)
             channels_df['routed_in'] = 0
             channels_df['routed_in_30day'] = 0
             channels_df['routed_in_7day'] = 0
@@ -1019,22 +875,22 @@ def channel(request):
             if rebalancer_df.shape[0]> 0:
                 channels_df['attempts'] = len(rebalancer_df[(rebalancer_df['status']>=2) & (rebalancer_df['status']<400)])
                 channels_df['success'] = len(rebalancer_df[rebalancer_df['status']==2])
-                channels_df['success_rate'] = 0 if channels_df['attempts'][0] == 0 else int((channels_df['success']/channels_df['attempts'])*100)
+                channels_df['success_rate'] = 0 if channels_df['attempts'].iloc[0] == 0 else ((channels_df['success']/channels_df['attempts'])*100).astype(int)
                 rebalancer_df_30d = rebalancer_df.loc[rebalancer_df['stop'] >= filter_30day]
                 if rebalancer_df_30d.shape[0]> 0:
                     channels_df['attempts_30day'] = len(rebalancer_df_30d[(rebalancer_df_30d['status']>=2) & (rebalancer_df_30d['status']<400)])
                     channels_df['success_30day'] = len(rebalancer_df_30d[rebalancer_df_30d['status']==2])
-                    channels_df['success_rate_30day'] = 0 if channels_df['attempts_30day'][0] == 0 else int((channels_df['success_30day']/channels_df['attempts_30day'])*100)
+                    channels_df['success_rate_30day'] = 0 if channels_df['attempts_30day'].iloc[0] == 0 else ((channels_df['success_30day']/channels_df['attempts_30day'])*100).astype(int)
                     rebalancer_df_7d = rebalancer_df_30d.loc[rebalancer_df_30d['stop'] >= filter_7day]
                     if rebalancer_df_7d.shape[0]> 0:
                         channels_df['attempts_7day'] = len(rebalancer_df_7d[(rebalancer_df_7d['status']>=2) & (rebalancer_df_7d['status']<400)])
                         channels_df['success_7day'] = len(rebalancer_df_7d[rebalancer_df_7d['status']==2])
-                        channels_df['success_rate_7day'] = 0 if channels_df['attempts_7day'][0] == 0 else int((channels_df['success_7day']/channels_df['attempts_7day'])*100)
+                        channels_df['success_rate_7day'] = 0 if channels_df['attempts_7day'].iloc[0] == 0 else ((channels_df['success_7day']/channels_df['attempts_7day'])*100).astype(int)
                         rebalancer_df_1d = rebalancer_df_7d.loc[rebalancer_df_7d['stop'] >= filter_1day]
                         if rebalancer_df_1d.shape[0]> 0:
                             channels_df['attempts_1day'] = len(rebalancer_df_1d[(rebalancer_df_1d['status']>=2) & (rebalancer_df_1d['status']<400)])
                             channels_df['success_1day'] = len(rebalancer_df_1d[rebalancer_df_1d['status']==2])
-                            channels_df['success_rate_1day'] = 0 if channels_df['attempts_1day'][0] == 0 else int((channels_df['success_1day']/channels_df['attempts_1day'])*100)
+                            channels_df['success_rate_1day'] = 0 if channels_df['attempts_1day'].iloc[0] == 0 else ((channels_df['success_1day']/channels_df['attempts_1day'])*100).astype(int)
             if forwards_df.shape[0]> 0:
                 forwards_in_df = forwards_df[forwards_df['chan_id_in'] == chan_id]
                 forwards_out_df = forwards_df[forwards_df['chan_id_out'] == chan_id]
@@ -1049,7 +905,7 @@ def channel(request):
                 forwards_in_df_sum = forwards_in_df.groupby('chan_id_in', as_index=True).sum(numeric_only=True)
                 channels_df['routed_in'] = forwards_in_df_count.loc[chan_id].amt_out_msat
                 channels_df['amt_routed_in'] = int(forwards_in_df_sum.loc[chan_id].amt_out_msat/1000)
-                channels_df['average_in'] = 0 if channels_df['routed_in'][0] == 0 else int(channels_df['amt_routed_in']/channels_df['routed_in'])
+                channels_df['average_in'] = 0 if channels_df['routed_in'].iloc[0] == 0 else (channels_df['amt_routed_in']/channels_df['routed_in']).astype(int)
                 channels_df['revenue_assist'] = int(forwards_in_df_sum.loc[chan_id].fee) if forwards_in_df_sum.empty == False else 0
                 forwards_in_df_30d = forwards_in_df.loc[forwards_in_df['forward_date'] >= filter_30day]
                 if forwards_in_df_30d.shape[0] > 0:
@@ -1057,7 +913,7 @@ def channel(request):
                     forwards_in_df_30d_sum = forwards_in_df_30d.groupby('chan_id_in', as_index=True).sum(numeric_only=True)
                     channels_df['routed_in_30day'] = forwards_in_df_30d_count.loc[chan_id].amt_out_msat
                     channels_df['amt_routed_in_30day'] = int(forwards_in_df_30d_sum.loc[chan_id].amt_out_msat/1000)
-                    channels_df['average_in_30day'] = 0 if channels_df['routed_in_30day'][0] == 0 else int(channels_df['amt_routed_in_30day']/channels_df['routed_in_30day'])
+                    channels_df['average_in_30day'] = 0 if channels_df['routed_in_30day'].iloc[0] == 0 else (channels_df['amt_routed_in_30day']/channels_df['routed_in_30day']).astype(int)
                     channels_df['revenue_assist_30day'] = int(forwards_in_df_30d_sum.loc[chan_id].fee) if forwards_in_df_30d_sum.empty == False else 0
                     forwards_in_df_7d = forwards_in_df_30d.loc[forwards_in_df_30d['forward_date'] >= filter_7day]
                     if forwards_in_df_7d.shape[0] > 0:
@@ -1065,7 +921,7 @@ def channel(request):
                         forwards_in_df_7d_sum = forwards_in_df_7d.groupby('chan_id_in', as_index=True).sum(numeric_only=True)
                         channels_df['routed_in_7day'] = forwards_in_df_7d_count.loc[chan_id].amt_out_msat
                         channels_df['amt_routed_in_7day'] = int(forwards_in_df_7d_sum.loc[chan_id].amt_out_msat/1000)
-                        channels_df['average_in_7day'] = 0 if channels_df['routed_in_7day'][0] == 0 else int(channels_df['amt_routed_in_7day']/channels_df['routed_in_7day'])
+                        channels_df['average_in_7day'] = 0 if channels_df['routed_in_7day'].iloc[0] == 0 else (channels_df['amt_routed_in_7day']/channels_df['routed_in_7day']).astype(int)
                         channels_df['revenue_assist_7day'] = int(forwards_in_df_7d_sum.loc[chan_id].fee)
                         forwards_in_df_7d_sum = forwards_in_df_7d[forwards_in_df_7d['amt_out_msat']>=1000000].groupby('chan_id_in', as_index=True).sum(numeric_only=True)
                         if forwards_in_df_7d_sum.shape[0] > 0:
@@ -1077,7 +933,7 @@ def channel(request):
                             forwards_in_df_1d_sum = forwards_in_df_1d.groupby('chan_id_in', as_index=True).sum(numeric_only=True)
                             channels_df['routed_in_1day'] = forwards_in_df_1d_count.loc[chan_id].amt_out_msat
                             channels_df['amt_routed_in_1day'] = int(forwards_in_df_1d_sum.loc[chan_id].amt_out_msat/1000)
-                            channels_df['average_in_1day'] = 0 if channels_df['routed_in_1day'][0] == 0 else int(channels_df['amt_routed_in_1day']/channels_df['routed_in_1day'])
+                            channels_df['average_in_1day'] = 0 if channels_df['routed_in_1day'].iloc[0] == 0 else (channels_df['amt_routed_in_1day']/channels_df['routed_in_1day']).astype(int)
                             channels_df['revenue_assist_1day'] = int(forwards_in_df_1d_sum.loc[chan_id].fee)
             if forwards_out_df.shape[0]> 0:
                 start_date = forwards_out_df['forward_date'].min()
@@ -1085,7 +941,7 @@ def channel(request):
                 forwards_out_df_sum = forwards_out_df.groupby('chan_id_out', as_index=True).sum(numeric_only=True)
                 channels_df['routed_out'] = forwards_out_df_count.loc[chan_id].amt_out_msat
                 channels_df['amt_routed_out'] = int(forwards_out_df_sum.loc[chan_id].amt_out_msat/1000)
-                channels_df['average_out'] = 0 if channels_df['routed_out'][0] == 0 else int(channels_df['amt_routed_out']/channels_df['routed_out'])
+                channels_df['average_out'] = 0 if channels_df['routed_out'].iloc[0] == 0 else (channels_df['amt_routed_out']/channels_df['routed_out']).astype(int)
                 channels_df['revenue'] = int(forwards_out_df_sum.loc[chan_id].fee) if forwards_out_df_sum.empty == False else 0
                 forwards_out_df_30d = forwards_out_df.loc[forwards_out_df['forward_date'] >= filter_30day]
                 if forwards_out_df_30d.shape[0] > 0:
@@ -1093,7 +949,7 @@ def channel(request):
                     forwards_out_df_30d_sum = forwards_out_df_30d.groupby('chan_id_out', as_index=True).sum(numeric_only=True)
                     channels_df['routed_out_30day'] = forwards_out_df_30d_count.loc[chan_id].amt_out_msat
                     channels_df['amt_routed_out_30day'] = int(forwards_out_df_30d_sum.loc[chan_id].amt_out_msat/1000)
-                    channels_df['average_out_30day'] = 0 if channels_df['routed_out_30day'][0] == 0 else int(channels_df['amt_routed_out_30day']/channels_df['routed_out_30day'])
+                    channels_df['average_out_30day'] = 0 if channels_df['routed_out_30day'].iloc[0] == 0 else (channels_df['amt_routed_out_30day']/channels_df['routed_out_30day']).astype(int)
                     channels_df['revenue_30day'] = int(forwards_out_df_30d_sum.loc[chan_id].fee) if forwards_out_df_30d_sum.empty == False else 0
                     forwards_out_df_7d = forwards_out_df_30d.loc[forwards_out_df_30d['forward_date'] >= filter_7day]
                     if forwards_out_df_7d.shape[0] > 0:
@@ -1101,7 +957,7 @@ def channel(request):
                         forwards_out_df_7d_sum = forwards_out_df_7d.groupby('chan_id_out', as_index=True).sum(numeric_only=True)
                         channels_df['routed_out_7day'] = forwards_out_df_7d_count.loc[chan_id].amt_out_msat
                         channels_df['amt_routed_out_7day'] = int(forwards_out_df_7d_sum.loc[chan_id].amt_out_msat/1000)
-                        channels_df['average_out_7day'] = 0 if channels_df['routed_out_7day'][0] == 0 else int(channels_df['amt_routed_out_7day']/channels_df['routed_out_7day'])
+                        channels_df['average_out_7day'] = 0 if channels_df['routed_out_7day'].iloc[0] == 0 else (channels_df['amt_routed_out_7day']/channels_df['routed_out_7day']).astype(int)
                         channels_df['revenue_7day'] = int(forwards_out_df_7d_sum.loc[chan_id].fee)
                         forwards_out_df_7d_sum = forwards_out_df_7d[forwards_out_df_7d['amt_out_msat']>=1000000].groupby('chan_id_out', as_index=True).sum(numeric_only=True)
                         if forwards_out_df_7d_sum.shape[0] > 0:
@@ -1113,7 +969,7 @@ def channel(request):
                             forwards_out_df_1d_sum = forwards_out_df_1d.groupby('chan_id_out', as_index=True).sum(numeric_only=True)
                             channels_df['routed_out_1day'] = forwards_out_df_1d_count.loc[chan_id].amt_out_msat
                             channels_df['amt_routed_out_1day'] = int(forwards_out_df_1d_sum.loc[chan_id].amt_out_msat/1000)
-                            channels_df['average_out_1day'] = 0 if channels_df['routed_out_1day'][0] == 0 else int(channels_df['amt_routed_out_1day']/channels_df['routed_out_1day'])
+                            channels_df['average_out_1day'] = 0 if channels_df['routed_out_1day'].iloc[0] == 0 else (channels_df['amt_routed_out_1day']/channels_df['routed_out_1day']).astype(int)
                             channels_df['revenue_1day'] = int(forwards_out_df_1d_sum.loc[chan_id].fee)
             if payments_df.shape[0] > 0:
                 payments_df_count = payments_df.groupby('chan_out', as_index=True).count()
@@ -1173,65 +1029,19 @@ def channel(request):
             channels_df['profits_30day'] = channels_df['revenue_30day'] - channels_df['costs_30day']
             channels_df['profits_7day'] = channels_df['revenue_7day'] - channels_df['costs_7day']
             channels_df['profits_1day'] = channels_df['revenue_1day'] - channels_df['costs_1day']
-            channels_df['profits_vol'] = 0 if channels_df['amt_routed_out'][0] == 0 else int(channels_df['profits'] / (channels_df['amt_routed_out']/1000000))
-            channels_df['profits_vol_30day'] = 0 if channels_df['amt_routed_out_30day'][0] == 0 else int(channels_df['profits_30day'] / (channels_df['amt_routed_out_30day']/1000000))
-            channels_df['profits_vol_7day'] = 0 if channels_df['amt_routed_out_7day'][0] == 0 else int(channels_df['profits_7day'] / (channels_df['amt_routed_out_7day']/1000000))
-            channels_df['profits_vol_1day'] = 0 if channels_df['amt_routed_out_1day'][0] == 0 else int(channels_df['profits_1day'] / (channels_df['amt_routed_out_1day']/1000000))
+            channels_df['profits_vol'] = 0 if channels_df['amt_routed_out'].iloc[0] == 0 else (channels_df['profits']/(channels_df['amt_routed_out']/1000000)).astype(int)
+            channels_df['profits_vol_30day'] = 0 if channels_df['amt_routed_out_30day'].iloc[0] == 0 else (channels_df['profits_30day']/(channels_df['amt_routed_out_30day']/1000000)).astype(int)
+            channels_df['profits_vol_7day'] = 0 if channels_df['amt_routed_out_7day'].iloc[0] == 0 else (channels_df['profits_7day']/(channels_df['amt_routed_out_7day']/1000000)).astype(int)
+            channels_df['profits_vol_1day'] = 0 if channels_df['amt_routed_out_1day'].iloc[0] == 0 else (channels_df['profits_1day']/(channels_df['amt_routed_out_1day']/1000000)).astype(int)
             channels_df = channels_df.copy()
-            if LocalSettings.objects.filter(key='AF-MaxRate').exists():
-                max_rate = int(LocalSettings.objects.filter(key='AF-MaxRate')[0].value)
-            else:
-                LocalSettings(key='AF-MaxRate', value='2500').save()
-                max_rate = 2500
-            if LocalSettings.objects.filter(key='AF-MinRate').exists():
-                min_rate = int(LocalSettings.objects.filter(key='AF-MinRate')[0].value)
-            else:
-                LocalSettings(key='AF-MinRate', value='0').save()
-                min_rate = 0
-            if LocalSettings.objects.filter(key='AF-Increment').exists():
-                increment = int(LocalSettings.objects.filter(key='AF-Increment')[0].value)
-            else:
-                LocalSettings(key='AF-Increment', value='5').save()
-                increment = 5
-            if LocalSettings.objects.filter(key='AF-Multiplier').exists():
-                multiplier = int(LocalSettings.objects.filter(key='AF-Multiplier')[0].value)
-            else:
-                LocalSettings(key='AF-Multiplier', value='5').save()
-                multiplier = 5
-            if LocalSettings.objects.filter(key='AF-FailedHTLCs').exists():
-                failed_htlc_limit = int(LocalSettings.objects.filter(key='AF-FailedHTLCs')[0].value)
-            else:
-                LocalSettings(key='AF-FailedHTLCs', value='25').save()
-                failed_htlc_limit = 25
-            channels_df['net_routed_7day'] = round((channels_df['amt_routed_out_7day_fees']-channels_df['amt_routed_in_7day_fees'])/channels_df['capacity'], 1)
             channels_df['out_rate'] = int((channels_df['revenue_7day_fees']/channels_df['amt_routed_out_7day_fees'])*1000000) if channels_df['amt_routed_out_7day_fees'][0] > 0 else 0
             channels_df['rebal_ppm'] = int((channels_df['costs_7day']/channels_df['amt_rebal_in_7day'])*1000000) if channels_df['amt_rebal_in_7day'][0] > 0 else 0
-            channels_df['profit_margin'] = channels_df['out_rate']*((100-channels_df['ar_max_cost'])/100)
-            channels_df['max_suggestion'] = int((channels_df['out_rate'] if channels_df['out_rate'][0] > 0 else channels_df['local_fee_rate'])*1.15) if channels_df['in_percent'][0] > 25 else int(channels_df['local_fee_rate'])
-            channels_df['max_suggestion'] = channels_df['local_fee_rate']+25 if channels_df['max_suggestion'][0] > (channels_df['local_fee_rate'][0]+25) else channels_df['max_suggestion']
-            channels_df['min_suggestion'] = int((channels_df['out_rate'] if channels_df['out_rate'][0] > 0 else channels_df['local_fee_rate'])*0.75) if channels_df['out_percent'][0] > 25 else int(channels_df['local_fee_rate'])
-            channels_df['min_suggestion'] = channels_df['local_fee_rate']-50 if channels_df['min_suggestion'][0] < (channels_df['local_fee_rate'][0]-50) else channels_df['min_suggestion']
             channels_df['assisted_ratio'] = round((channels_df['revenue_assist_7day_fees'] if channels_df['revenue_7day_fees'][0] == 0 else channels_df['revenue_assist_7day_fees']/channels_df['revenue_7day_fees']), 2)
-            channels_df['adjusted_out_rate'] = int(channels_df['out_rate']+channels_df['net_routed_7day']*channels_df['assisted_ratio']*multiplier)
-            channels_df['adjusted_rebal_rate'] = int(channels_df['rebal_ppm']+channels_df['profit_margin'])
-            channels_df['out_rate_only'] = int(channels_df['out_rate']+channels_df['net_routed_7day']*channels_df['out_rate']*(multiplier/100))
-            channels_df['fee_rate_only'] = int(channels_df['local_fee_rate']+channels_df['net_routed_7day']*channels_df['local_fee_rate']*(multiplier/100))
-            channels_df['new_rate'] = channels_df['adjusted_out_rate'] if channels_df['net_routed_7day'][0] != 0 else (channels_df['adjusted_rebal_rate'] if channels_df['rebal_ppm'][0] > 0 and channels_df['out_rate'][0] > 0 else (channels_df['out_rate_only'] if channels_df['out_rate'][0] > 0 else (channels_df['min_suggestion'] if channels_df['net_routed_7day'][0] == 0 and channels_df['in_percent'][0] < 25 else channels_df['fee_rate_only'])))
-            channels_df['new_rate'] = 0 if channels_df['new_rate'][0] < 0 else channels_df['new_rate']
-            channels_df['adjustment'] = int(channels_df['new_rate']-channels_df['local_fee_rate'])
-            channels_df['new_rate'] = channels_df['local_fee_rate']-10 if channels_df['adjustment'][0]==0 and channels_df['out_percent'][0] >= 25 and channels_df['net_routed_7day'][0]==0 else channels_df['new_rate']
-            channels_df['new_rate'] = channels_df['local_fee_rate']+25 if channels_df['adjustment'][0]==0 and channels_df['out_percent'][0] < 25 and channels_df['failed_out_1day'][0]>failed_htlc_limit else channels_df['new_rate']
-            channels_df['new_rate'] = channels_df['max_suggestion'] if channels_df['max_suggestion'][0] > 0 and channels_df['new_rate'][0] > channels_df['max_suggestion'][0] else channels_df['new_rate']
-            channels_df['new_rate'] = channels_df['min_suggestion'] if channels_df['new_rate'][0] < channels_df['min_suggestion'][0] else channels_df['new_rate']
-            channels_df['new_rate'] = int(round(channels_df['new_rate']/increment, 0)*increment)
-            channels_df['new_rate'] = max_rate if max_rate < channels_df['new_rate'][0] else channels_df['new_rate']
-            channels_df['new_rate'] = min_rate if min_rate > channels_df['new_rate'][0] else channels_df['new_rate']
-            channels_df['adjustment'] = int(channels_df['new_rate']-channels_df['local_fee_rate'])
             channels_df['inbound_can'] = ((channels_df['remote_balance']*100)/channels_df['capacity'])/channels_df['ar_in_target']
-            channels_df['fee_ratio'] = 100 if channels_df['local_fee_rate'][0] == 0 else int(round(((channels_df['remote_fee_rate']/channels_df['local_fee_rate'])*1000)/10, 0))
-            channels_df['fee_check'] = 1 if channels_df['ar_max_cost'][0] == 0 else int(round(((channels_df['fee_ratio']/channels_df['ar_max_cost'])*1000)/10, 0))
+            channels_df['fee_ratio'] = 100 if channels_df['local_fee_rate'].iloc[0] == 0 else (round((channels_df['remote_fee_rate']/channels_df['local_fee_rate'])*1000/10)).astype(int)
+            channels_df['fee_check'] = 1 if channels_df['ar_max_cost'].iloc[0] == 0 else (((channels_df['fee_ratio']/channels_df['ar_max_cost'])*1000)/10).round(0).astype(int)
             channels_df = channels_df.copy()
-            channels_df['steps'] = 0 if channels_df['inbound_can'][0] < 1 else int(((channels_df['in_percent']-channels_df['ar_in_target'])/((channels_df['ar_amt_target']/channels_df['capacity'])*100))+0.999)
+            channels_df['steps'] = 0 if channels_df['inbound_can'].iloc[0] < 1 else (((channels_df['in_percent']-channels_df['ar_in_target'])/((channels_df['ar_amt_target']/channels_df['capacity'])*100))+0.999).astype(int)
             channels_df['apy'] = 0.0
             channels_df['apy_30day'] = 0.0
             channels_df['apy_7day'] = 0.0
@@ -1264,28 +1074,16 @@ def channel(request):
             autofees_df = DataFrame.from_records(Autofees.objects.filter(chan_id=chan_id).filter(timestamp__gte=filter_30day).order_by('-id').values())
             if autofees_df.shape[0]> 0:
                 autofees_df['change'] = autofees_df.apply(lambda row: 0 if row.old_value == 0 else round((row.new_value-row.old_value)*100/row.old_value, 1), axis=1)
-            peer_events_df = DataFrame.from_records(PeerEvents.objects.filter(chan_id=chan_id).order_by('-id')[:10].values())
-            if peer_events_df.shape[0]> 0:
-                peer_events_df['change'] = peer_events_df.apply(lambda row: 0 if row.old_value == 0 or row.old_value == None else round((row.new_value-row.old_value)*100/row.old_value, 1), axis=1)
-                peer_events_df['out_percent'] = round((peer_events_df['out_liq']/channels_df['capacity'][0])*100, 1)
-                peer_events_df.loc[peer_events_df['event']=='MinHTLC', 'old_value'] = peer_events_df['old_value']/1000
-                peer_events_df.loc[peer_events_df['event']=='MinHTLC', 'new_value'] = peer_events_df['new_value']/1000
-                peer_events_df.loc[peer_events_df['event']=='MaxHTLC', 'old_value'] = peer_events_df['old_value']/1000
-                peer_events_df.loc[peer_events_df['event']=='MaxHTLC', 'new_value'] = peer_events_df['new_value']/1000
-                peer_events_df = peer_events_df.fillna('')
-                peer_events_df.loc[peer_events_df['old_value']!='', 'old_value'] = peer_events_df.loc[peer_events_df['old_value']!='', 'old_value'].astype(int)
-                peer_events_df.loc[peer_events_df['new_value']!='', 'new_value'] = peer_events_df.loc[peer_events_df['new_value']!='', 'new_value'].astype(int)
-                peer_events_df['out_percent'] = peer_events_df['out_percent'].astype(int)
-                peer_events_df['in_percent'] = (100-peer_events_df['out_percent'])
+            results_df = af.main(channel)
+            channels_df['new_rate'] = results_df[results_df['chan_id']==chan_id]['new_rate']
+            channels_df['adjustment'] = results_df[results_df['chan_id']==chan_id]['adjustment']
+            channels_df['net_routed_7day'] = results_df[results_df['chan_id']==chan_id]['net_routed_7day']
         else:
             channels_df = DataFrame()
-            forwards_df = DataFrame()
             payments_df = DataFrame()
             invoices_df = DataFrame()
-            failed_htlc_df = DataFrame()
             peer_info_df = DataFrame()
             autofees_df = DataFrame()
-            peer_events_df = DataFrame()
         context = {
             'chan_id': chan_id,
             'channel': [] if channels_df.empty else channels_df.to_dict(orient='records')[0],
@@ -1301,7 +1099,6 @@ def channel(request):
             'graph_links': graph_links(),
             'network_links': network_links(),
             'autofees': [] if autofees_df.empty else autofees_df.to_dict(orient='records'),
-            'peer_events': [] if peer_events_df.empty else peer_events_df.to_dict(orient='records')
         }
         try:
             return render(request, 'channel.html', context)
@@ -1345,6 +1142,7 @@ def actions(request):
             result = {}
             result['chan_id'] = channel.chan_id
             result['short_chan_id'] = channel.short_chan_id
+            result['remote_pubkey'] = channel.remote_pubkey
             result['alias'] = channel.alias
             result['capacity'] = channel.capacity
             result['local_balance'] = channel.local_balance + channel.pending_outbound
@@ -1402,8 +1200,8 @@ def pending_htlcs(request):
         stub = lnrpc.LightningStub(lnd_connect())
         block_height = stub.GetInfo(ln.GetInfoRequest()).block_height
         context = {
-            'incoming_htlcs': PendingHTLCs.objects.filter(incoming=True).annotate(blocks_til_expiration=Sum('expiration_height')-block_height, hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('hash_lock'),
-            'outgoing_htlcs': PendingHTLCs.objects.filter(incoming=False).annotate(blocks_til_expiration=Sum('expiration_height')-block_height, hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('hash_lock')
+            'incoming_htlcs': PendingHTLCs.objects.filter(incoming=True).annotate(blocks_til_expiration=Sum('expiration_height')-block_height, hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('expiration_height'),
+            'outgoing_htlcs': PendingHTLCs.objects.filter(incoming=False).annotate(blocks_til_expiration=Sum('expiration_height')-block_height, hours_til_expiration=((Sum('expiration_height')-block_height)*10)/60).order_by('expiration_height')
         }
         return render(request, 'pending_htlcs.html', context)
     else:
@@ -1413,14 +1211,9 @@ def pending_htlcs(request):
 def failed_htlcs(request):
     if request.method == 'GET':
         try:
-            query = None if request.GET.urlencode()[1:] == '' else request.GET.urlencode()[1:].split('_')
-            chan_id = None if query is None or len(query) < 1 else query[0]
-            direction = None if query is None or len(query) < 2 else query[1]
-            failed_htlcs = FailedHTLCs.objects.exclude(wire_failure=99).order_by('-id')[:150] if chan_id is None else (FailedHTLCs.objects.exclude(wire_failure=99).filter(chan_id_out=chan_id).order_by('-id')[:150] if direction == "O" else FailedHTLCs.objects.exclude(wire_failure=99).filter(chan_id_in=chan_id).order_by('-id')[:150])
             filter_7day = datetime.now() - timedelta(days=7)
             agg_failed_htlcs = FailedHTLCs.objects.filter(timestamp__gte=filter_7day, wire_failure=99).values('chan_id_in', 'chan_id_out').annotate(count=Count('id'), volume=Sum('amount'), chan_in_alias=Max('chan_in_alias'), chan_out_alias=Max('chan_out_alias')).order_by('-count')[:21]
             context = {
-                'failed_htlcs': failed_htlcs,
                 'agg_failed_htlcs': agg_failed_htlcs
             }
             return render(request, 'failed_htlcs.html', context)
@@ -1641,10 +1434,7 @@ def batch_open(request):
 @is_login_required(login_required(login_url='/lndg-admin/login/?next=/'), settings.LOGIN_REQUIRED)
 def forwards(request):
     if request.method == 'GET':
-        context = {
-            'forwards': Forwards.objects.all().annotate(amt_in=Sum('amt_in_msat')/1000, amt_out=Sum('amt_out_msat')/1000, ppm=Round((Sum('fee')*1000000000)/Sum('amt_out_msat'), output_field=IntegerField())).order_by('-id')[:150],
-        }
-        return render(request, 'forwards.html', context)
+        return render(request, 'forwards.html')
     else:
         return redirect('home')
 
@@ -1711,27 +1501,7 @@ def autofees(request):
 def peerevents(request):
     if request.method == 'GET':
         try:
-            chan_id = request.GET.urlencode()[1:]
-            filter_7d = datetime.now() - timedelta(days=7)
-            peer_events_df = DataFrame.from_records(PeerEvents.objects.filter(timestamp__gte=filter_7d).order_by('-id')[:150].values() if chan_id == "" else PeerEvents.objects.filter(chan_id=chan_id).filter(timestamp__gte=filter_7d).order_by('-id')[:150].values())
-            channels_df = DataFrame.from_records(Channels.objects.values() if chan_id == "" else Channels.objects.filter(chan_id=chan_id).values())
-            if peer_events_df.shape[0]> 0:
-                peer_events_df = peer_events_df.merge(channels_df)
-                peer_events_df['change'] = peer_events_df.apply(lambda row: 0 if row.old_value == 0 or row.old_value == None else round((row.new_value-row.old_value)*100/row.old_value, 1), axis=1)
-                peer_events_df['out_percent'] = round((peer_events_df['out_liq']/peer_events_df['capacity'])*100, 1)
-                peer_events_df.loc[peer_events_df['event']=='MinHTLC', 'old_value'] = peer_events_df['old_value']/1000
-                peer_events_df.loc[peer_events_df['event']=='MinHTLC', 'new_value'] = peer_events_df['new_value']/1000
-                peer_events_df.loc[peer_events_df['event']=='MaxHTLC', 'old_value'] = peer_events_df['old_value']/1000
-                peer_events_df.loc[peer_events_df['event']=='MaxHTLC', 'new_value'] = peer_events_df['new_value']/1000
-                peer_events_df = peer_events_df.fillna('')
-                peer_events_df.loc[peer_events_df['old_value']!='', 'old_value'] = peer_events_df.loc[peer_events_df['old_value']!='', 'old_value'].astype(int)
-                peer_events_df.loc[peer_events_df['new_value']!='', 'new_value'] = peer_events_df.loc[peer_events_df['new_value']!='', 'new_value'].astype(int)
-                peer_events_df['out_percent'] = peer_events_df['out_percent'].astype(int)
-                peer_events_df['in_percent'] = (100-peer_events_df['out_percent'])
-            context = {
-                'peer_events': [] if peer_events_df.empty else peer_events_df.sort_values(by=['id'], ascending=False).to_dict(orient='records')
-            }
-            return render(request, 'peerevents.html', context)
+            return render(request, 'peerevents.html')
         except Exception as e:
             try:
                 error = str(e.code())
@@ -1924,31 +1694,33 @@ def get_local_settings(*prefixes):
     if 'AR-' in prefixes:
         form.append({'unit': '', 'form_id': 'update_channels', 'id': 'update_channels'})
         form.append({'unit': '', 'form_id': 'enabled', 'value': 0, 'label': 'AR Enabled', 'id': 'AR-Enabled', 'title':'This enables or disables the auto-scheduling function', 'min':0, 'max':1},)
-        form.append({'unit': '%', 'form_id': 'target_percent', 'value': 0, 'label': 'AR Target Amount', 'id': 'AR-Target%', 'title': 'The percentage of the total capacity to target as the rebalance amount', 'min':0.1, 'max':100})
-        form.append({'unit': 'min', 'form_id': 'target_time', 'value': 0, 'label': 'AR Target Time', 'id': 'AR-Time', 'title': 'The time spent per individual rebalance attempt', 'min':1, 'max':60})
-        form.append({'unit': 'ppm', 'form_id': 'fee_rate', 'value': 0, 'label': 'AR Max Fee Rate', 'id': 'AR-MaxFeeRate', 'title': 'The max rate we can ever use to refill a channel with outbound', 'min':1, 'max':2500})
-        form.append({'unit': '%', 'form_id': 'outbound_percent', 'value': 0, 'label': 'AR Target Out Above', 'id': 'AR-Outbound%', 'title': 'When a channel is not enabled for targeting; the minimum outbound a channel must have to be a source for refilling another channel', 'min':1, 'max':100})
-        form.append({'unit': '%', 'form_id': 'inbound_percent', 'value': 0, 'label': 'AR Target In Above', 'id': 'AR-Inbound%', 'title': 'When a channel is enabled for targeting; the maximum inbound a channel can have before selected for auto rebalance', 'min':1, 'max':100})
-        form.append({'unit': '%', 'form_id': 'max_cost', 'value': 0, 'label': 'AR Max Cost', 'id': 'AR-MaxCost%', 'title': 'The ppm to target which is the percentage of the outbound fee rate for the channel being refilled', 'min':1, 'max':100})
+        form.append({'unit': '%', 'form_id': 'target_percent', 'value': 5, 'label': 'AR Target Amount', 'id': 'AR-Target%', 'title': 'The percentage of the total capacity to target as the rebalance amount', 'min':0.1, 'max':100})
+        form.append({'unit': 'min', 'form_id': 'target_time', 'value': 5, 'label': 'AR Target Time', 'id': 'AR-Time', 'title': 'The time spent per individual rebalance attempt', 'min':1, 'max':60})
+        form.append({'unit': 'ppm', 'form_id': 'fee_rate', 'value': 100, 'label': 'AR Max Fee Rate', 'id': 'AR-MaxFeeRate', 'title': 'The max rate we can ever use to refill a channel with outbound', 'min':1, 'max':5000})
+        form.append({'unit': '%', 'form_id': 'outbound_percent', 'value': 75, 'label': 'AR Target Out Above', 'id': 'AR-Outbound%', 'title': 'When a channel is not enabled for targeting; the minimum outbound a channel must have to be a source for refilling another channel', 'min':1, 'max':100})
+        form.append({'unit': '%', 'form_id': 'inbound_percent', 'value': 100, 'label': 'AR Target In Above', 'id': 'AR-Inbound%', 'title': 'When a channel is enabled for targeting; the maximum inbound a channel can have before selected for auto rebalance', 'min':1, 'max':100})
+        form.append({'unit': '%', 'form_id': 'max_cost', 'value': 65, 'label': 'AR Max Cost', 'id': 'AR-MaxCost%', 'title': 'The ppm to target which is the percentage of the outbound fee rate for the channel being refilled', 'min':1, 'max':100})
         form.append({'unit': '%', 'form_id': 'variance', 'value': 0, 'label': 'AR Variance', 'id': 'AR-Variance', 'title': 'The percentage of the target amount to be randomly varied with every rebalance attempt', 'min':0, 'max':100})
-        form.append({'unit': 'min', 'form_id': 'wait_period', 'value': 0, 'label': 'AR Wait Period', 'id': 'AR-WaitPeriod', 'title': 'The minutes we should wait after a failed attempt before trying again', 'min':1, 'max':10080})
+        form.append({'unit': 'min', 'form_id': 'wait_period', 'value': 30, 'label': 'AR Wait Period', 'id': 'AR-WaitPeriod', 'title': 'The minutes we should wait after a failed attempt before trying again', 'min':1, 'max':10080})
         form.append({'unit': '', 'form_id': 'autopilot', 'value': 0, 'label': 'Autopilot', 'id': 'AR-Autopilot', 'title': 'This enables or disables the Autopilot function which automatically acts upon suggestions on this page: /actions', 'min':0, 'max':1})
-        form.append({'unit': 'days', 'form_id': 'autopilotdays', 'value': 0, 'label': 'Autopilot Days', 'id': 'AR-APDays', 'title': 'Number of days to consider for autopilot. Default 7', 'min':0, 'max':100})
+        form.append({'unit': 'days', 'form_id': 'autopilotdays', 'value': 7, 'label': 'Autopilot Days', 'id': 'AR-APDays', 'title': 'Number of days to consider for autopilot. Default 7', 'min':0, 'max':100})
         form.append({'unit': '', 'form_id': 'workers', 'value': 1, 'label': 'Workers', 'id': 'AR-Workers', 'title': 'Number of workers', 'min':1, 'max':12})
     if 'AF-' in prefixes:
         form.append({'unit': '', 'form_id': 'af_enabled', 'value': 0, 'label': 'Autofee', 'id': 'AF-Enabled', 'title': 'Enable/Disable Auto-fee functionality', 'min':0, 'max':1})
-        form.append({'unit': 'ppm', 'form_id': 'af_maxRate', 'value': 0, 'label': 'AF Max Rate', 'id': 'AF-MaxRate', 'title': 'Minimum Rate', 'min':0, 'max':5000})
+        form.append({'unit': 'ppm', 'form_id': 'af_maxRate', 'value': 2500, 'label': 'AF Max Rate', 'id': 'AF-MaxRate', 'title': 'Maximum Rate', 'min':0, 'max':5000})
         form.append({'unit': 'ppm', 'form_id': 'af_minRate', 'value': 0, 'label': 'AF Min Rate', 'id': 'AF-MinRate', 'title': 'Minimum Rate', 'min':0, 'max':5000})
-        form.append({'unit': 'ppm', 'form_id': 'af_increment', 'value': 0, 'label': 'AF Increment', 'id': 'AF-Increment', 'title': 'Amount to increment on each interaction', 'min':0, 'max':100})
-        form.append({'unit': '%', 'form_id': 'af_multiplier', 'value': 0, 'label': 'AF Multiplier', 'id': 'AF-Multiplier', 'title': 'Multiplier to be applied to Auto-Fee', 'min':0, 'max':100})
-        form.append({'unit': '', 'form_id': 'af_failedHTLCs', 'value': 0, 'label': 'AF FailedHTLCs', 'id': 'AF-FailedHTLCs', 'title': 'Failed HTLCs', 'min':0, 'max':100})
-        form.append({'unit': 'hours', 'form_id': 'af_updateHours', 'value': 0, 'label': 'AF Update', 'id': 'AF-UpdateHours', 'title': 'Number of hours to consider to update fees. Default 24', 'min':0, 'max':100})
+        form.append({'unit': 'ppm', 'form_id': 'af_increment', 'value': 5, 'label': 'AF Increment', 'id': 'AF-Increment', 'title': 'Amount to increment on each interaction', 'min':1, 'max':100})
+        form.append({'unit': 'x', 'form_id': 'af_multiplier', 'value': 5, 'label': 'AF Multiplier', 'id': 'AF-Multiplier', 'title': 'Multiplier to be applied to Auto-Fee', 'min':1, 'max':100})
+        form.append({'unit': '', 'form_id': 'af_failedHTLCs', 'value': 25, 'label': 'AF FailedHTLCs', 'id': 'AF-FailedHTLCs', 'title': 'Failed HTLCs', 'min':1, 'max':100})
+        form.append({'unit': 'hours', 'form_id': 'af_updateHours', 'value': 24, 'label': 'AF Update', 'id': 'AF-UpdateHours', 'title': 'Number of hours to consider to update fees. Default 24', 'min':1, 'max':100})
+        form.append({'unit': '%', 'form_id': 'af_lowliq', 'value': 15, 'label': 'AF LowLiq', 'id': 'AF-LowLiqLimit', 'title': 'Limit for low liq AF rules. Default 5', 'min':0, 'max':100})
+        form.append({'unit': '%', 'form_id': 'af_excess', 'value': 90, 'label': 'AF Excess', 'id': 'AF-ExcessLimit', 'title': 'Limit for excess liq AF rules. Default 95', 'min':0, 'max':100})
     if 'GUI-' in prefixes:
-        form.append({'unit': '', 'form_id': 'gui_graphLinks', 'value': graph_links(), 'label': 'Graph URL', 'id': 'GUI-GraphLinks', 'title': 'Preferred Graph URL'})
-        form.append({'unit': '', 'form_id': 'gui_netLinks', 'value': network_links(), 'label': 'NET URL', 'id': 'GUI-NetLinks', 'title': 'Preferred NET URL'})
+        form.append({'unit': '', 'form_id': 'gui_graphLinks', 'value': 'https://amboss.space', 'label': 'Graph URL', 'id': 'GUI-GraphLinks', 'title': 'Preferred Graph URL'})
+        form.append({'unit': '', 'form_id': 'gui_netLinks', 'value': 'https://mempool.space', 'label': 'NET URL', 'id': 'GUI-NetLinks', 'title': 'Preferred NET URL'})
     if 'LND-' in prefixes:
         form.append({'unit': '', 'form_id': 'lnd_cleanPayments', 'value': 0, 'label': 'LND Clean Payments', 'id': 'LND-CleanPayments', 'title': 'Clean LND Payments', 'min':0, 'max':1})
-        form.append({'unit': 'days', 'form_id': 'lnd_retentionDays', 'value': 30, 'label': 'LND Retention', 'id': 'LND-RetentionDays', 'title': 'LND Retention days'})
+        form.append({'unit': 'days', 'form_id': 'lnd_retentionDays', 'value': 30, 'label': 'LND Retention', 'id': 'LND-RetentionDays', 'title': 'LND Retention days', 'min':1, 'max':1000})
 
     for prefix in prefixes:
         ar_settings = LocalSettings.objects.filter(key__contains=prefix).values('key', 'value').order_by('key')
@@ -1973,21 +1745,23 @@ def update_settings(request):
                     {'form_id': 'wait_period', 'value': 30, 'parse': lambda x: x,'id': 'AR-WaitPeriod'},
                     {'form_id': 'autopilot', 'value': 0, 'parse': lambda x: x,'id': 'AR-Autopilot'},
                     {'form_id': 'autopilotdays', 'value': 7, 'parse': lambda x: x,'id': 'AR-APDays'},
-                    {'form_id': 'workers', 'value': 5, 'parse': lambda x: x,'id': 'AR-Workers'},
+                    {'form_id': 'workers', 'value': 1, 'parse': lambda x: x,'id': 'AR-Workers'},
                     #AF
                     {'form_id': 'af_enabled', 'value': 0, 'parse': lambda x: int(x),'id': 'AF-Enabled'},
                     {'form_id': 'af_maxRate', 'value': 2500, 'parse': lambda x: int(x),'id': 'AF-MaxRate'},
                     {'form_id': 'af_minRate', 'value': 0, 'parse': lambda x: int(x),'id': 'AF-MinRate'},
                     {'form_id': 'af_increment', 'value': 5, 'parse': lambda x: int(x),'id': 'AF-Increment'},
                     {'form_id': 'af_multiplier', 'value': 5, 'parse': lambda x: int(x),'id': 'AF-Multiplier'},
-                    {'form_id': 'af_failedHTLCs', 'value': 25, 'parse': lambda x: int(x),'id': 'AF-FailedHTLCs'}, 
-                    {'form_id': 'af_updateHours', 'value': 24, 'parse': lambda x: int(x),'id': 'AF-UpdateHours'}, 
+                    {'form_id': 'af_failedHTLCs', 'value': 25, 'parse': lambda x: int(x),'id': 'AF-FailedHTLCs'},
+                    {'form_id': 'af_updateHours', 'value': 24, 'parse': lambda x: int(x),'id': 'AF-UpdateHours'},
+                    {'form_id': 'af_lowliq', 'value': 15, 'parse': lambda x: int(x),'id': 'AF-LowLiqLimit'},
+                    {'form_id': 'af_excess', 'value': 90, 'parse': lambda x: int(x),'id': 'AF-ExcessLimit'},
                     #GUI
-                    {'form_id': 'gui_graphLinks', 'value': '0', 'parse': lambda x: x,'id': 'GUI-GraphLinks'}, 
-                    {'form_id': 'gui_netLinks', 'value': '0', 'parse': lambda x: x,'id': 'GUI-NetLinks'}, 
+                    {'form_id': 'gui_graphLinks', 'value': 'https://amboss.space', 'parse': lambda x: x,'id': 'GUI-GraphLinks'},
+                    {'form_id': 'gui_netLinks', 'value': 'https://mempool.space', 'parse': lambda x: x,'id': 'GUI-NetLinks'},
                     #LND
-                    {'form_id': 'lnd_cleanPayments', 'value': '0', 'parse': lambda x: x, 'id': 'LND-CleanPayments'}, 
-                    {'form_id': 'lnd_retentionDays', 'value': '0', 'parse': lambda x: x, 'id': 'LND-RetentionDays'}, 
+                    {'form_id': 'lnd_cleanPayments', 'value': 0, 'parse': lambda x: x, 'id': 'LND-CleanPayments'},
+                    {'form_id': 'lnd_retentionDays', 'value': 30, 'parse': lambda x: x, 'id': 'LND-RetentionDays'},
                     ]
 
         form = LocalSettingsForm(request.POST)
@@ -2247,15 +2021,14 @@ def update_setting(request):
                 target = int(value)
                 channels = Channels.objects.filter(is_open=True, private=False).update(auto_fees=target)
                 messages.success(request, 'Auto Fees setting for all channels updated to a value of: ' + str(target))
-                enabled = int(value)
                 try:
                     db_enabled = LocalSettings.objects.get(key='AF-UpdateHours')
                 except:
                     LocalSettings(key='AF-UpdateHours', value='24').save()
                     db_enabled = LocalSettings.objects.get(key='AF-UpdateHours')
-                db_enabled.value = enabled
+                db_enabled.value = target
                 db_enabled.save()
-                messages.success(request, 'Updated autofees update hours setting to: ' + str(enabled))
+                messages.success(request, 'Updated autofees update hours setting to: ' + str(target))
             else:
                 messages.error(request, 'Invalid Request. Please try again. [' + key +']')
         else:
@@ -2366,7 +2139,7 @@ class InvoicesViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Invoices.objects.all().order_by('-creation_date')
     serializer_class = InvoiceSerializer
-    filterset_fields = {'state': ['lt', 'gt']}
+    filterset_fields = {'state': ['exact','lt', 'gt'], 'is_revenue': ['exact'], 'settle_date': ['gte']}
 
     def update(self, request, pk=None):
         setting = get_object_or_404(Invoices.objects.all(), pk=pk)
@@ -2377,11 +2150,28 @@ class InvoicesViewSet(viewsets.ReadOnlyModelViewSet):
         else:
             return Response(serializer.errors)
 
+class ForwardsFilter(FilterSet):
+    chan_in_or_out = CharFilter(method='filter_chan_in_or_out', label='Chan In Or Out')
+    forward_date__lte = DateTimeFilter(field_name='forward_date', lookup_expr='lte')
+    forward_date__gte = DateTimeFilter(field_name='forward_date', lookup_expr='gte')
+    forward_date__lt = DateTimeFilter(field_name='forward_date', lookup_expr='lt')
+    forward_date__gt = DateTimeFilter(field_name='forward_date', lookup_expr='gt')
+    id__lt = NumberFilter(field_name='id', lookup_expr='lt')
+
+    def filter_chan_in_or_out(self, queryset, name, value):
+        return queryset.filter(
+            Q(chan_id_in__exact=value) | Q(chan_id_out__exact=value)
+        )
+
+    class Meta:
+        model = Forwards
+        fields = ['chan_in_or_out', 'forward_date__lte', 'forward_date__gte', 'forward_date__lt', 'forward_date__gt', 'id__lt']
+
 class ForwardsViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Forwards.objects.all().order_by('-id')
     serializer_class = ForwardSerializer
-    filterset_fields = {'forward_date': ['lte','gte', 'lt', 'gt']}
+    filterset_class = ForwardsFilter
 
 class PeersViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
@@ -2410,11 +2200,34 @@ class PendingHTLCViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = PendingHTLCs.objects.all()
     serializer_class = PendingHTLCSerializer
 
+class PeerEventsViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
+    queryset = PeerEvents.objects.all().order_by('-id')
+    serializer_class = PeerEventsSerializer
+    filterset_fields = {'chan_id': ['exact'], 'id': ['lt']}
+
+class FailedHTLCFilter(FilterSet):
+    chan_in_or_out = CharFilter(method='filter_chan_in_or_out', label='Chan In Or Out')
+    chan_id_in = CharFilter(field_name='chan_id_in', lookup_expr='exact')
+    chan_id_out = CharFilter(field_name='chan_id_out', lookup_expr='exact')
+    wire_failure__lt = NumberFilter(field_name='wire_failure', lookup_expr='lt')
+    wire_failure__gt = NumberFilter(field_name='wire_failure', lookup_expr='gt')
+    id__lt = NumberFilter(field_name='id', lookup_expr='lt')
+
+    def filter_chan_in_or_out(self, queryset, name, value):
+        return queryset.filter(
+            Q(chan_id_in__exact=value) | Q(chan_id_out__exact=value)
+        )
+
+    class Meta:
+        model = FailedHTLCs
+        fields = ['chan_in_or_out', 'chan_id_in', 'chan_id_out', 'wire_failure__lt', 'wire_failure__gt', 'id__lt']
+
 class FailedHTLCViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = FailedHTLCs.objects.all().order_by('-id')
     serializer_class = FailedHTLCSerializer
-    filterset_fields = {'wire_failure': ['lt','gt']}
+    filterset_class = FailedHTLCFilter
 
 class LocalSettingsViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
@@ -2448,7 +2261,7 @@ class RebalancerViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated] if settings.LOGIN_REQUIRED else []
     queryset = Rebalancer.objects.all().order_by('-id')
     serializer_class = RebalancerSerializer
-    filterset_fields = {'status':['lt','gt','exact'], 'payment_hash':['exact'], 'stop':['gt'], 'last_hop_pubkey':['exact']}
+    filterset_fields = {'status':['lt','gt','exact'], 'payment_hash':['exact'], 'stop':['gt'], 'last_hop_pubkey':['exact'], 'id':['lt']}
     def create(self, request):
         serializer = self.get_serializer(data=request.data, context={'request': request})
         if serializer.is_valid():

@@ -97,6 +97,8 @@ class Channels(models.Model):
     remote_cltv = models.IntegerField()
     remote_min_htlc_msat = models.BigIntegerField()
     remote_max_htlc_msat = models.BigIntegerField()
+    push_amt = models.BigIntegerField()
+    close_address = models.CharField(max_length=100)
     is_active = models.BooleanField()
     is_open = models.BooleanField()
     last_update = models.DateTimeField()
@@ -107,6 +109,7 @@ class Channels(models.Model):
     ar_max_cost = models.IntegerField()
     fees_updated = models.DateTimeField(default=timezone.now)
     auto_fees = models.BooleanField()
+    notes = models.TextField(default='', blank=True)
 
     def save(self, *args, **kwargs):
         if self.auto_fees is None:
@@ -159,6 +162,7 @@ class Peers(models.Model):
     inbound = models.BooleanField()
     connected = models.BooleanField()
     last_reconnected = models.DateTimeField(null=True, default=None)
+    ping_time = models.BigIntegerField(default=0)
     class Meta:
         app_label = 'gui'
 

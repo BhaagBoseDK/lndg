@@ -12,3 +12,4 @@ cp_lndg.sh
 .vs
 gui/static/admin
 gui/static/rest_framework
+data/
