@@ -592,7 +592,7 @@ def agg_failed_htlcs():
     agg_htlcs(FailedHTLCs.objects.filter(timestamp__lte=time_filter).exclude(failure_detail__in=[6, 99])[:100], 'other')
 
 def main():
-    print (f"{datetime.now().strftime('%c')} : Entering Jobs")
+    #print (f"{datetime.now().strftime('%c')} : Entering Jobs")
     time.sleep(69)
     try:
         stub = lnrpc.LightningStub(lnd_connect())
@@ -610,6 +610,6 @@ def main():
         agg_failed_htlcs()
     except Exception as e:
         print (f"{datetime.now().strftime('%c')} : Error processing background data: {str(e)=}")
-    print (f"{datetime.now().strftime('%c')} : Exiting Jobs")
+    #print (f"{datetime.now().strftime('%c')} : Exiting Jobs")
 if __name__ == '__main__':
     main()
