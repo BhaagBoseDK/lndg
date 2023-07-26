@@ -291,32 +291,38 @@ def auto_enable():
                         #Special Case for LOOP, Wos, etc. Always Auto Rebalance if enabled to keep outbound full.
                         #print (f"{datetime.now().strftime('%c')} : Skipping AR enabled and 100% oTarget channel... {peer_channel.alias=} {peer_channel.chan_id=}")
                         pass
-                    elif oapD > (iapD*1.10) and outbound_percent > 75:
+                    elif oapD > (iapD*1.10) and outbound_percent > 69:
                         #print('Case 1: Pass')
                         pass
-                    elif oapD > (iapD*1.10) and inbound_percent > 75 and peer_channel.auto_rebalance == False:
-                        #print('Case 2: Enable AR - o7D > i7D AND Inbound Liq > 75%')
+                    elif oapD > (iapD*1.10) and inbound_percent > 69 and peer_channel.auto_rebalance == False:
+                        #print('Case 2: Enable AR - o7D > i7D AND Inbound Liq > inbound trigger')
                         peer_channel.auto_rebalance = True
                         peer_channel.save()
-                        Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting='Enabled', old_value=0, new_value=1).save()
-                        print (f"{datetime.now().strftime('%c')} : Auto Pilot Enabled: {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=}")
-                    elif oapD < (iapD*1.10) and outbound_percent > 75 and peer_channel.auto_rebalance == True:
-                        #print('Case 3: Disable AR - o7D < i7D AND Outbound Liq > 75%')
+                        Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting=(f"Enabled [2:{iapD}:{oapD}]"), old_value=0, new_value=1).save()
+                        print (f"{datetime.now().strftime('%c')} : Auto Pilot Enabled(2): {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=} {inbound_percent=}")
+                    elif oapD <= (iapD*1.10) and outbound_percent > 69 and peer_channel.auto_rebalance == True:
+                        #print('Case 3: Disable AR - o7D < i7D AND Outbound Liq > outbound trigger')
                         peer_channel.auto_rebalance = False
                         peer_channel.save()
-                        Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting='Enabled', old_value=1, new_value=0).save()
-                        print (f"{datetime.now().strftime('%c')} : Auto Pilot Disabled(3) {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=}")
-                    elif oapD == 0 and iapD == 0 and peer_channel.auto_rebalance == True:
-                        #print('Case 3.1: Disable AR - o7D = 0 i7D = 0')
+                        Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting=(f"Enabled [3:{iapD}:{oapD}]"), old_value=1, new_value=0).save()
+                        print (f"{datetime.now().strftime('%c')} : Auto Pilot Disabled(3) {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=} {outbound_percent=}")
+                    elif oapD == 0 and iapD == 0 and outbound_percent > 21 and peer_channel.auto_rebalance == True:
+                        #print('Case 4: Disable AR - o7D = 0 i7D = 0 no routing and outbound > toggle off trigger')
                         peer_channel.auto_rebalance = False
                         peer_channel.save()
-                        Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting='Enabled', old_value=1, new_value=0).save()
-                        print (f"{datetime.now().strftime('%c')} : Auto Pilot Disabled(3.1) {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=}")
-                    elif oapD < (iapD*1.10) and inbound_percent > 75:
-                        #print('Case 4: Pass')
+                        Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting=(f"Enabled [4:{iapD}:{oapD}]"), old_value=1, new_value=0).save()
+                        print (f"{datetime.now().strftime('%c')} : Auto Pilot Disabled(4) {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=} {outbound_percen}")
+                    elif oapD == 0 and iapD == 0 and outbound_percent < 11 and peer_channel.auto_rebalance == False:
+                        #print('Case 5: Enable AR - o7D = 0 i7D = 0 no routing and outbound < toggle on trigger')
+                        peer_channel.auto_rebalance = True
+                        peer_channel.save()
+                        Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting=(f"Enabled [5:{iapD}:{oapD}]"), old_value=0, new_value=1).save()
+                        print (f"{datetime.now().strftime('%c')} : Auto Pilot Enabled(5) {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=} {outbound_percent=}")
+                    elif oapD <= (iapD*1.10) and inbound_percent > 69:
+                        #print('Case 6: Pass')
                         pass
                     else:
-                        #print('Case 5: Pass')
+                        #print('Case 7: Pass catch all')
                         pass
     except Exception as e:
         print (f"{datetime.now().strftime('%c')} : Error during auto channel enabling: {str(e)=}")
