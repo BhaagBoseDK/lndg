@@ -57,7 +57,7 @@ async def run_rebalancer(rebalance, worker):
             chan_ids = json.loads(rebalance.outgoing_chan_ids)
             timeout = rebalance.duration * 60
             invoice_response = stub.AddInvoice(ln.Invoice(value=rebalance.value, expiry=timeout))
-            print (f"{datetime.now().strftime('%c')} : {worker=} starting rebalance for: {rebalance.target_alias=} {rebalance.last_hop_pubkey=} {rebalance.value=} {rebalance.duration=} {chan_ids=}")
+            print (f"{datetime.now().strftime('%c')} : {worker=} starting rebalance for: {rebalance.target_alias=} {rebalance.last_hop_pubkey=} {rebalance.value=} {rebalance.duration=}")
             async for payment_response in routerstub.SendPaymentV2(lnr.SendPaymentRequest(payment_request=str(invoice_response.payment_request), fee_limit_msat=int(rebalance.fee_limit*1000), outgoing_chan_ids=chan_ids, last_hop_pubkey=bytes.fromhex(rebalance.last_hop_pubkey), timeout_seconds=(timeout-5), allow_self_payment=True), timeout=(timeout+60)):
                 #print (f"{datetime.now().strftime('%c')} : {worker=} got a payment response: {payment_response.status=} {payment_response.failure_reason=} {payment_response.payment_hash=}")
                 rebalance.payment_hash = payment_response.payment_hash
@@ -99,7 +99,7 @@ async def run_rebalancer(rebalance, worker):
         finally:
             rebalance.stop = datetime.now()
             await save_record(rebalance)
-            print (f"{datetime.now().strftime('%c')} : {worker=} completed payment attempts for: {rebalance.payment_hash=}")
+            print (f"{datetime.now().strftime('%c')} : {worker=} completed payment attempts for: {rebalance.target_alias=} {rebalance.last_hop_pubkey=} {rebalance.value=} {rebalance.payment_hash=} {rebalance.status=}")
             original_alias = rebalance.target_alias
             inc=1.21
             dec=2
@@ -174,12 +174,14 @@ def update_channels(stub, incoming_channel, outgoing_channel):
         db_channel.local_balance = channel.local_balance
         db_channel.remote_balance = channel.remote_balance
         db_channel.save()
+        print (f"{datetime.now().strftime('%c')} : Incoming Channel Update {channel.chan_id=} {int(channel.local_balance/channel.capacity*100)}% {channel.local_balance=} {channel.remote_balance=} {incoming_channel=}")
         # Outgoing channel update
         channel = stub.ListChannels(ln.ListChannelsRequest(peer=bytes.fromhex(outgoing_channel))).channels[0]
         db_channel = Channels.objects.filter(chan_id=channel.chan_id)[0]
         db_channel.local_balance = channel.local_balance
         db_channel.remote_balance = channel.remote_balance
         db_channel.save()
+        print (f"{datetime.now().strftime('%c')} : Outgoing Channel Update {channel.chan_id=} {int(channel.local_balance/channel.capacity*100)}% {channel.local_balance=} {channel.remote_balance=} {outgoing_channel=}")
     except Exception as e:
         print (f"{datetime.now().strftime('%c')} : Error updating channel balances: {str(e)=}")
 
@@ -243,11 +245,11 @@ def auto_schedule() -> List[Rebalancer]:
                     last_rebalance = Rebalancer.objects.filter(last_hop_pubkey=target.remote_pubkey).exclude(status=0).order_by('-id')[0]
                     if not (last_rebalance.status == 2 or (last_rebalance.status > 2 and (int((datetime.now() - last_rebalance.stop).total_seconds() / 60) > wait_period)) or (last_rebalance.status == 1 and ((int((datetime.now() - last_rebalance.start).total_seconds() / 60) - last_rebalance.duration) > wait_period))):
                         continue
-                print(f"{datetime.now().strftime('%c')} : Creating Auto Rebalance Request for: {target.chan_id}")
-                print(f"{datetime.now().strftime('%c')} : Request routing through: {outbound_cans}")
-                print(f"{datetime.now().strftime('%c')} : {target_value} / {target.ar_amt_target}")
-                print(f"{datetime.now().strftime('%c')} : {target_fee}")
-                print(f"{datetime.now().strftime('%c')} : {target_time}")
+                print(f"{datetime.now().strftime('%c')} : Creating Auto Rebalance Request for: {target.chan_id=} {target.alias=} {target_value=} / {target.ar_amt_target=} {target_time=}")
+                #print(f"{datetime.now().strftime('%c')} : Request routing through: {outbound_cans}")
+                #print(f"{datetime.now().strftime('%c')} : {target_value} / {target.ar_amt_target}")
+                #print(f"{datetime.now().strftime('%c')} : {target_fee}")
+                #print(f"{datetime.now().strftime('%c')} : {target_time}")
                 new_rebalance = Rebalancer(value=target_value, fee_limit=target_fee, outgoing_chan_ids=str(outbound_cans).replace('\'', ''), last_hop_pubkey=target.remote_pubkey, target_alias=target.alias, duration=target_time)
                 new_rebalance.save()
                 to_schedule.append(new_rebalance)
@@ -306,12 +308,12 @@ def auto_enable():
                         peer_channel.save()
                         Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting=(f"Enabled [3:{iapD}:{oapD}]"), old_value=1, new_value=0).save()
                         print (f"{datetime.now().strftime('%c')} : Auto Pilot Disabled(3) {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=} {outbound_percent=}")
-                    elif oapD == 0 and iapD == 0 and outbound_percent > 21 and peer_channel.auto_rebalance == True:
+                    elif oapD == 0 and outbound_percent > 21 and peer_channel.auto_rebalance == True:
                         #print('Case 4: Disable AR - o7D = 0 i7D = 0 no routing and outbound > toggle off trigger')
                         peer_channel.auto_rebalance = False
                         peer_channel.save()
                         Autopilot(chan_id=peer_channel.chan_id, peer_alias=peer_channel.alias, setting=(f"Enabled [4:{iapD}:{oapD}]"), old_value=1, new_value=0).save()
-                        print (f"{datetime.now().strftime('%c')} : Auto Pilot Disabled(4) {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=} {outbound_percen}")
+                        print (f"{datetime.now().strftime('%c')} : Auto Pilot Disabled(4) {peer_channel.alias=} {peer_channel.chan_id=} {oapD=} {iapD=} {outbound_percent=}")
                     elif oapD == 0 and iapD == 0 and outbound_percent < 11 and peer_channel.auto_rebalance == False:
                         #print('Case 5: Enable AR - o7D = 0 i7D = 0 no routing and outbound < toggle on trigger')
                         peer_channel.auto_rebalance = True
